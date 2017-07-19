@@ -12,43 +12,63 @@ it. Before you *use* a function here, please ask about its status.
 
 # nono for non-CGI: use CGI::Switch ();
 
+use File::Basename ();
 use Compress::Zlib ();
+use Cwd ();
 use DBI ();
 use Exporter;
-use Fcntl qw(:flock);
+use Fcntl qw(:flock SEEK_SET);
 my $HAVE_RECENTFILE = eval {require File::Rsync::Mirror::Recentfile; 1;};
 use File::Spec ();
 use IO::File ();
-use MD5 ();
+use List::Util ();
+use Digest::MD5 ();
+use Digest::SHA1 ();
 use Mail::Send ();
 use Sys::Hostname ();
+use Time::Piece;
 use YAML::Syck;
 
-my $USE_RECENTFILE_HOOKS = Sys::Hostname::hostname =~ /pause/;
+our $USE_RECENTFILE_HOOKS = Sys::Hostname::hostname =~ /pause/;
 if ($USE_RECENTFILE_HOOKS) {
   unless ($HAVE_RECENTFILE) {
     die "Did not find Recentfile library!";
   }
 }
-
+our $IS_PAUSE_US = Sys::Hostname::hostname =~ /pause2/ ? 1 : 0;
 
 use strict;
-use vars qw(@ISA @EXPORT_OK $VERSION $Config);
+use vars qw(@ISA @EXPORT_OK $VERSION $Config $Id);
 
 @ISA = qw(Exporter); ## no critic
 @EXPORT_OK = qw(urecord);
 
 $VERSION = "1.005";
+$Id = "PAUSE version $PAUSE::VERSION";
 
 # for Configuration Variable we use PrivatePAUSE.pm, because these are
 # really variables we cannot publish. Will separate harmless variables
 # from the secret ones and put them here in the future.
 
-my(@pauselib) = grep m!(/PAUSE|\.\.|/SVN)/lib!, @INC;
-for (@pauselib) {
-  s|/lib|/privatelib|;
+my($pauselib) = File::Basename::dirname Cwd::abs_path __FILE__;
+{
+  my $try = $pauselib;
+  $try =~ s|pause/(?:blib/)?lib|pause-private|; # pause2.develooper.com has pause/ and pause-private/
+  if (-e $try) { # pause-private is accessible for apache, lib not
+    $pauselib = "$try/lib";
+  } else {
+    $try = $pauselib;
+    $try =~ s|/lib|/privatelib|;           # pause.fiz-chemie.de has lib/ and privatelib/
+    if (-e $try) {
+      $pauselib = $try;
+    } else {
+      die "Alert: did not find private directory pauselib[$pauselib] try[$try]";
+    }
+  }
 }
-push @INC, @pauselib;
+
+push @INC, $pauselib;
+
 $PAUSE::Config ||=
     {
      # previously also used for ftp password; still used in Error as
@@ -63,56 +83,100 @@ $PAUSE::Config ||=
      AUTHEN_PASSWORD_FLD => "password",
      AUTHEN_USER_FLD => "user",
      AUTHEN_USER_TABLE => "usertable",
+     AUTHEN_BACKUP_DIR => $IS_PAUSE_US
+     ? '/home/puppet/pause-var/backup'
+     : '/home/k/PAUSE/111_sensitive/backup',
+     BZCAT_PATH => (List::Util::first { -x $_ } ("/bin/bzcat", "/usr/bin/bzcat" )),
+     BZIP2_PATH => (List::Util::first { -x $_ } ("/bin/bzip2", "/usr/bin/bzip2" )),
      CPAN_TESTERS => qq(cpan-uploads\@perl.org), # cpan-uploads is a mailing list, BINGOS relies on it
      TO_CPAN_TESTERS => qq(cpan-uploads\@perl.org),
      REPLY_TO_CPAN_TESTERS => qq(cpan-uploads\@perl.org),
      DELETES_EXPIRE => 60*60*72,
      FTPPUB => '/home/ftp/pub/PAUSE/',
+     GITROOT => '/home/ftp/pub/PAUSE/PAUSE-git',
      GONERS_NOTIFY => qq{gbarr\@search.cpan.org},
-     GZIP => '/bin/gzip',
-     HOME => '/home/k/',
-     HTTP_ERRORLOG => '/usr/local/apache/logs/error_log',
-     INCOMING => 'ftp://pause.perl.org/incoming/',
+     GZIP_OPTIONS => '--best --rsyncable',
+     GZIP_PATH => (List::Util::first { -x $_ } ("/bin/gzip", "/usr/bin/gzip" )),
+     HOME => $IS_PAUSE_US ? '/home/puppet/' : '/home/k/',
+     CRONPATH => $IS_PAUSE_US ? '/home/puppet/pause/cron' : '/home/k/pause/cron',
+     HTTP_ERRORLOG => '/usr/local/apache/logs/error_log', # harmless use in cron-daily
+     INCOMING => $IS_PAUSE_US ? 'ftp://localhost/incoming/' : 'ftp://pause.perl.org/incoming/',
      INCOMING_LOC => '/home/ftp/incoming/',
+     LOG_CALLBACK => sub {
+       # $entity: entity from which to grab log configuration
+       # $level: level by which logs are filtered
+       # @what: messages being logged
+       my($entity,$level,@what) = @_;
+       unless (@what) {
+         @what = ("warning: verbose called without \@what: ", $level);
+         $level = 1;
+       }
+       return if $level > ($entity->{VERBOSE}||0);
+       unless (exists $entity->{INTRODUCED}) {
+         my $now = scalar localtime;
+         require Data::Dumper;
+         unshift @what, "Running $0, $Id, $now",
+           Data::Dumper->new([$entity],[qw()])->Indent(1)->Useqq(1)->Dump;
+         $entity->{INTRODUCED} = undef;
+       }
+       push @what, "\n" unless $what[-1] =~ m{\n$};
+       my $logfh;
+       if (my $logfile = $entity->{OPT}{logfile}) {
+         open $logfh, ">>", $logfile or die;
+         unshift @what, scalar localtime;
+       } else {
+         $logfh = *STDOUT;
+       }
+       print $logfh @what;
+     },
+     MAIL_MAILER => ["sendmail"],
      MAXRETRIES => 16,
      MIRRORCONFIG => '/usr/local/mirror/mymirror.config',
+     MIRRORED_BY_URL => "ftp://ftp.funet.fi/pub/languages/perl/CPAN/MIRRORED.BY",
      MLROOT => '/home/ftp/pub/PAUSE/authors/id/', # originally module list root
+     ML_CHOWN_USER  => $IS_PAUSE_US ? qq{pause-unsafe} : qq{UNSAFE},
+     ML_CHOWN_GROUP => $IS_PAUSE_US ? qq{pause-unsafe} : qq{UNSAFE},
+     ML_MIN_INDEX_LINES => 1_000, # 02packages must be this long
+     ML_MIN_FILES => 20_000, # must be this many files to run mldistwatch
      MOD_DATA_SOURCE_NAME => "dbi:mysql:mod",
      NO_SUCCESS_BREAK => 900,
-     P5P => 'perl-release-announce@perl.org',
-     PAUSE_LOG => "/home/k/PAUSE/log/paused.log",
-     PAUSE_LOG_DIR => "/home/k/PAUSE/log/",
+     P5P => 'release-announce@perl.org',
+     PID_DIR => "/var/run/",
+     PAUSE_LOG => $IS_PAUSE_US ? "/var/log/paused.log" : "/home/k/PAUSE/log/paused.log",
+     PAUSE_LOG_DIR => $IS_PAUSE_US ? "/var/log" : "/home/k/PAUSE/log/",
      PAUSE_PUBLIC_DATA => '/home/ftp/pub/PAUSE/PAUSE-data',
      PML => 'ftp://pause.perl.org/pub/PAUSE/authors/id/',
+     PUB_MODULE_URL => 'http://www.cpan.org/authors/id/',
      RUNDATA => "/usr/local/apache/rundata/pause_1999",
      RUNTIME_MLDISTWATCH => 600, # 720 was the longest of on 2003-08-10,
                                  # 2004-12-xx we frequently see >20 minutes
                                  # 2006-05-xx 7-9 minutes observed
      SLEEP => 75,
-     # path to repository without "/trunk"
-     SVNPATH => "/home/SVN/repos",
-     # path to where we find the svn binaries
-     SVNBIN => "/usr/bin",
      TIMEOUT => 60*60,
      TMP => '/home/ftp/tmp/',
      UPLOAD => 'upload@pause.perl.org',
      # sign the auto-generated CHECKSUM files with:
-     CHECKSUMS_SIGNING_PROGRAM => ('gpg --homedir /home/k/PAUSE/111_sensi'.
-                                   'tive/gnupg-pause-batch-signing-home  '.
-                                   '--clearsign --default-key '),
+     CHECKSUMS_SIGNING_PROGRAM => ('gpg'),
+     CHECKSUMS_SIGNING_ARGS => '--homedir /home/puppet/pause-private/gnupg-pause-batch-signing-home --clearsign --default-key ',
      CHECKSUMS_SIGNING_KEY => '450F89EC',
-     BATCH_SIG_HOME => '/home/k/PAUSE/111_sensitive/gnupg-pause-batch-signing-home',
-     MIN_MTIME_CHECKSUMS => (time - 60*60*24*365.25), # max one year old
+     BATCH_SIG_HOME => "/home/puppet/pause-private/gnupg-pause-batch-signing-home",
+     MIN_MTIME_CHECKSUMS => 1300000000, # invent a threshold for oldest mtime
      HAVE_PERLBAL => 1,
+     ZCAT_PATH  => (List::Util::first { -x $_ } ("/bin/zcat", "/usr/bin/zcat" )),
     };
 
-
-eval { require PrivatePAUSE; };
-if ($@) {
-  # PAUSE.pm is used in the timestamp cronjob without access to privatelib; cannot warn every minute
-  # warn "Could not find or read PrivatePAUSE.pm; will try to work without";
+unless ($INC{"PrivatePAUSE.pm"}) { # reload within apache
+  eval { require PrivatePAUSE; };
+  if ($@) {
+    if ($0 =~ /^(stamp|-e)$/) {
+      # PAUSE.pm is used in the timestamp cronjob without access to
+      # privatelib; cannot warn every minute warn "Could not find or
+      # read PrivatePAUSE.pm; will try to work without";
+    } else {
+      warn "Warning (continuing anyway): $@";
+    }
+  }
 }
-
 
 =pod
 
@@ -146,55 +210,79 @@ it does not work if the user does not supply credentials at all.
 If current time is after the last downtime event plus scheduled
 downtime, then we're back to normal operation.
 
+Hint: I like to use date to determine a timestamp in the future
+
+   % date +%s --date="Mon Dec 31 15:00:00 UTC 2012"
+
 =back
 
 =cut
 
 sub downtimeinfo {
-  return +{
-           downtime => 1197317508,
-           willlast => 0,
-          };
+  return $IS_PAUSE_US ? +{
+                          downtime => 1357374600,
+                          willlast => 5400,
+                         }
+      : +{
+          downtime => 1357374600,
+          willlast => 5400,
+         };
 }
 
 sub filehash {
   my($file) = @_;
-  my($ret,$authorfile,$size,$md5,$hexdigest);
+  my($ret,$authorfile,$size,$md5,$sha1,$hexdigest,$sha1hexdigest);
   $ret = "";
   if (substr($file,0,length($Config->{MLROOT})) eq $Config->{MLROOT}) {
-    $authorfile = "\$CPAN/authors/id/" . 
-	substr($file,length($Config->{MLROOT}));
+    $authorfile = "\$CPAN/authors/id/" .
+    substr($file,length($Config->{MLROOT}));
   } else {
     $authorfile = $file;
   }
   $size = -s $file;
-  $md5 = MD5->new;
+  $md5 = Digest::MD5->new;
+  $sha1 = Digest::SHA1->new;
   local *HANDLE;
   unless ( open HANDLE, "< $file\0" ){
     $ret .= "An error occurred, couldn't open $file: $!"
   }
   $md5->addfile(*HANDLE);
+  seek(HANDLE, SEEK_SET, 0);
+  $sha1->addfile(*HANDLE);
   close HANDLE;
   $hexdigest = $md5->hexdigest;
+  $sha1hexdigest = $sha1->hexdigest;
   $ret .= qq{
   file: $authorfile
   size: $size bytes
    md5: $hexdigest
+  sha1: $sha1hexdigest
 };
   return $ret;
+}
+
+sub log {
+    my ($self, @arg) = @_;
+    $PAUSE::Config->{LOG_CALLBACK}->(@arg);
 }
 
 sub dbh {
   my($db) = shift || "mod";
   my $dsn = $PAUSE::Config->{uc($db)."_DATA_SOURCE_NAME"};
-  warn "DEBUG: dsn[$dsn]";
-  DBI->connect(
+  my $dbh = DBI->connect(
                $dsn,
                $PAUSE::Config->{uc($db)."_DATA_SOURCE_USER"},
                $PAUSE::Config->{uc($db)."_DATA_SOURCE_PW"},
                { RaiseError => 1 }
               )
       or Carp::croak(qq{Can't DBI->connect(): $DBI::errstr});
+
+  if ($dsn =~ /^DBI:mysql:/) {
+    $dbh->do("SET sql_mode='STRICT_TRANS_TABLES'")
+      or Carp::croak(qq{Can't DBI->connect(): $DBI::errstr});
+  }
+
+  return $dbh;
 }
 
 sub urecord {
@@ -255,6 +343,7 @@ sub user_is {
   return $ret;
 }
 
+# must be case-insensitive
 sub owner_of_module {
     my($m, $dbh) = @_;
     $dbh ||= dbh();
@@ -264,14 +353,11 @@ sub owner_of_module {
                    FROM mods where modid = ?},
                  primeur => qq{SELECT package,
                           userid
-                   FROM primeur where package = ?},
+                   FROM primeur where LOWER(package) = LOWER(?)},
                 );
     for my $table (qw(mods primeur)) {
-        my $sth = $dbh->prepare($query{$table});
-        $sth->execute($m);
-        if ($sth->rows >= 1) {
-            return $sth->fetchrow_array; # ascii guaranteed
-        }
+        my $owner = $dbh->selectrow_arrayref($query{$table}, undef, $m);
+        return $owner->[1] if $owner;
     }
     return;
 }
@@ -330,8 +416,8 @@ sub gtest {
   my($buffer);
   my $gz;
   unless (
-	  $gz = Compress::Zlib::gzopen($read, "rb")
-	 ) {
+    $gz = Compress::Zlib::gzopen($read, "rb")
+  ) {
     warn("Cannot open $read: $!\n");
     return;
   }
@@ -361,7 +447,7 @@ our @common_args =
      comment => "These files are part of the CPAN mirroring concept, described in File::Rsync::Mirror::Recent",
     );
 
-sub newfile_hook ($) {
+sub newfile_hook {
   return unless $USE_RECENTFILE_HOOKS;
   my($f) = @_;
   my $rf;
@@ -387,7 +473,7 @@ sub newfile_hook ($) {
   $rf->update($f,"new");
 }
 
-sub delfile_hook ($) {
+sub delfile_hook {
   return unless $USE_RECENTFILE_HOOKS;
   my($f) = @_;
   my $rf;
@@ -411,6 +497,38 @@ sub delfile_hook ($) {
        aggregator => [qw(1d 1W Z)],
       );
   $rf->update($f,"delete");
+}
+
+sub _time_string {
+  my ($self, $s) = @_;
+  my $time = Time::Piece->new($s);
+  return join q{ }, $time->ymd, $time->hms;
+}
+
+sub _now_string {
+  my ($self) = @_;
+  return $self->_time_string(time);
+}
+
+sub user_has_pumpking_bit {
+  my ($self, $user) = @_;
+
+  use DBI;
+  my $adbh = DBI->connect(
+    $PAUSE::Config->{AUTHEN_DATA_SOURCE_NAME},
+    $PAUSE::Config->{AUTHEN_DATA_SOURCE_USER},
+    $PAUSE::Config->{AUTHEN_DATA_SOURCE_PW},
+  ) or die $DBI::errstr;
+
+  my ($ok) = $adbh->selectrow_array(
+    "SELECT COUNT(*) FROM grouptable WHERE user= ? AND ugroup='pumpking'",
+    undef,
+    $user,
+  );
+
+  $adbh->disconnect;
+
+  return $ok;
 }
 
 1;

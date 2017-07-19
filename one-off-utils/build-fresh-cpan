@@ -1,0 +1,189 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use lib 'lib';
+use lib 't/lib';
+
+use File::pushd;
+use File::Temp ();
+use Getopt::Long::Descriptive;
+use Path::Class;
+use PAUSE::TestPAUSE;
+use Parse::CPAN::Packages;
+use Parse::CPAN::Perms;
+
+my ($opt, $usage) = describe_options(
+  '%c %o [USER:]DISTFILE...',
+  [ 'dir=s',        'target directory; by default uses a tempdir' ],
+  [ 'verbose|v',    'print logs to STDERR as it goes'             ],
+  [ 'shell!',       'run a shell in the directory; default: true',
+                    { default => 1 } ],
+  [ 'dists-from=s', 'program to run to get dist names'            ],
+  [ 'each',         'index after each' ],
+  [ 'packages|p=s', '02packages file to prefill packages table'   ],
+  [ 'perms|P=s',    '06perms file to prefill mods/primeur/perms'  ],
+);
+
+my @uploads;
+if ($opt->dists_from) {
+  my $cmd = $opt->dists_from;
+  @uploads = `$cmd`;
+  chomp @uploads;
+} else {
+  $usage->die({ pre_text => "you didn't give any distfiles!\n\n" })
+    unless @uploads = @ARGV;
+}
+
+my $dir = $opt->dir;
+my $tmpdir;
+unless ($dir) {
+  $tmpdir = File::Temp->newdir;
+  $dir = "$tmpdir";
+}
+
+my $pause = PAUSE::TestPAUSE->init_new({
+  tmpdir                 => dir($dir),
+  email_sender_transport => 'Maildir',
+  email_sender_transport_args => {
+    dir => "$dir/Maildir", # Capital M to keep rjbs happy
+  },
+});
+
+open my $log_fh, '>', "$dir/pause.log"
+  or die "can't open $dir/pause.log for writing: $!\n";
+
+$pause->pause_config_overrides->{LOG_CALLBACK} = sub {
+  my (undef, undef, @what) = @_;
+  push @what, "\n" unless $what[-1] =~ m{\n$};
+  print {$log_fh} @what;
+  print STDERR @what if $opt->verbose;
+};
+
+if ($opt->packages) {
+  $pause->with_our_config(sub {
+    my $dbh = PAUSE::dbh;
+
+    my $p = Parse::CPAN::Packages->new($opt->packages);
+
+    my $query = "INSERT INTO packages (package, version, dist, status) VALUES (?, ?, ?, ?);";
+
+    my $count = 0;
+
+    print "Inserting packages from " . $opt->packages . "...\n";
+
+    $dbh->begin_work;
+
+    for my $pkg ($p->packages) {
+      dbh_do($dbh, $query, {},
+        $pkg->package,
+        $pkg->version,
+        $pkg->distribution->prefix,
+        "indexed",
+      );
+
+      $count++;
+    }
+
+    $dbh->commit;
+
+    print "\t...done! Inserted $count packages\n";
+  });
+}
+
+if ($opt->perms) {
+  $pause->with_our_config(sub {
+    my $dbh = PAUSE::dbh;
+
+    my $p = Parse::CPAN::Perms->new($opt->perms);
+
+    my $perms_data = $p->perms;
+
+    my %queries = (
+      m => "INSERT INTO mods    (modid,   userid) VALUES (?, ?)",
+      f => "INSERT INTO primeur (package, userid) VALUES (?, ?)",
+      c => "INSERT INTO perms   (package, userid) VALUES (?, ?)",
+    );
+
+#    my %inserted;
+
+    my $count = 0;
+
+    print "Inserting perms from " . $opt->perms . "...\n";
+
+    $dbh->begin_work;
+
+    for my $pkg (keys %$perms_data) {
+      for my $user (keys %{ $perms_data->{$pkg} }) {
+        my $perm = $perms_data->{$pkg}->{$user};
+
+#        # Add a users entry for the user ?
+#        unless ($inserted{$user}++) {
+#          dbh_do($dbh, "INSERT INTO users (userid, ustatus) VALUES (?, ?)", {},
+#            $user, 'active',
+#          );
+#        }
+
+        my $query = $queries{$perm} || die "Unknown perm flag $perm\n";
+
+        dbh_do($dbh, $query, {},
+          $pkg, $user,
+        );
+
+        $count++;
+      }
+    }
+
+    $dbh->commit;
+
+    print "\t...done! Inserted $count permissions\n";
+  });
+}
+
+my $just_reindexed;
+
+UPLOAD: for my $upload (@uploads) {
+  if ($upload eq '-') {
+    $pause->test_reindex;
+    $just_reindexed = 1;
+    next UPLOAD;
+  }
+
+  $pause->test_reindex if $opt->each;
+
+  my ($user, $distfile) = split /:/, $upload, 2;
+  ($user, $distfile) = (LOCAL => $user) unless defined $distfile;
+
+  $pause->upload_author_file($user => $distfile);
+  print {$log_fh} ">>>> Just uploaded $user/$distfile\n";
+  print {*STDERR} ">>>> Just uploaded $user/$distfile\n" if $opt->verbose;
+  $just_reindexed = 0;
+}
+
+$pause->test_reindex unless $just_reindexed;
+
+close $log_fh or warn "error closing $dir/pause.log: $!";
+
+if ($opt->shell) {
+  my $chdir_guard = pushd($dir);
+  system($ENV{SHELL});
+}
+
+sub dbh_do {
+  my ($dbh, @args) = @_;
+
+  my $ret;
+
+  # Capture errors so we can hopefully provide some
+  # useful debug.
+  eval {
+    $ret = $dbh->do(@args);
+  };
+
+  my $err = "";
+  $err = $dbh->errstr unless defined $ret;
+  $err ||= $@;
+
+  die "Failed insertion (@args): $err\n" if $err;
+}
+
+1;

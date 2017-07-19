@@ -5,13 +5,14 @@ package Mock::Dist;
 
 use base qw(Test::MockObject);
 use Test::More ();
+use Test::Deep ();
 
 my $null = sub {};
 
 my @NULL = qw(verbose alert connect disconnect mlroot);
 
 my %ALWAYS = (
-  version_from_yaml_ok => 1,
+  version_from_meta_ok => 1,
 );
 
 sub new {
@@ -31,16 +32,11 @@ sub next_call_ok {
     $label =~ s/\n$//;
     $label =~ s/\n.+$/.../s;
   }
-  Test::More::is_deeply(
+  Test::Deep::cmp_deeply(
     [ $self->next_call ],
     [ $method => [ $self, @$args ] ],
     $label,
   );
-}
-
-sub verbose_ok {
-  my ($self, $level, @what) = @_;
-  $self->next_call_ok(verbose => [ $level, @what ]);
 }
 
 1;

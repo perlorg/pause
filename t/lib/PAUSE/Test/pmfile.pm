@@ -6,6 +6,7 @@ package PAUSE::Test::pmfile;
 use Test::FITesque::Fixture;
 use base qw(Test::FITesque::Fixture);
 use Test::More;
+use Test::Deep;
 
 use Test::MockObject;
 use Test::MockObject::Extends;
@@ -14,7 +15,7 @@ use Mock::Dist;
 use Module::Faker::Dist;
 use Path::Class ();
 use Data::Dumper;
-use YAML;
+use YAML::XS;
 
 #my $PACKAGE = Test::MockObject::Extends->new('PAUSE::package');
 my $PACKAGE = Test::MockObject->new;
@@ -43,7 +44,7 @@ sub new {
     DIO    => $self->{dist},
     USERID => 'FAKE',
     TIME   => time,
-    YAML_CONTENT => {},
+    META_CONTENT => {},
     VERSION => $self->fake_dist->version,
   );
   $self->{pmfile} = Test::MockObject::Extends->new($self->{pmfile});
@@ -72,12 +73,15 @@ sub dist_mock :Test :Plan(1) {
 }
 
 my $ppp = 'My::Package';
-sub filter_ppps :Test :Plan(3) {
+sub filter_ppps :Test :Plan(2) {
   my ($self, $no_index, $expect) = @_;
-  $self->{pmfile}{YAML_CONTENT}{no_index} = $no_index;
+  $self->{pmfile}{META_CONTENT}{no_index} = $no_index;
+
+  my @verbose;
+  local $PAUSE::Config->{LOG_CALLBACK} = sub { shift; push @verbose, [@_] };
 
   my @res = $self->{pmfile}->filter_ppps($ppp);
-  is_deeply(
+  cmp_deeply(
     \@res,
     $expect->{skip} ? [] : [$ppp],
     "expected result",
@@ -85,51 +89,69 @@ sub filter_ppps :Test :Plan(3) {
   if ($expect->{reason}) {
     my $reason = $expect->{reason};
     if ($no_index) {
-      $reason = ($expect->{skip} ? "" : "NOT ")
-        . "skipping ppp[$ppp] $reason";
+      $reason = ($expect->{skip})
+              ? "Skipping ppp[$ppp] $reason"
+              : "NOT skipping ppp[$ppp] $reason";
     }
-    $self->{dist}->next_call_ok(verbose => [ 1, $reason ]);
-    $self->{dist}->next_call_ok(verbose => [ 1, "res[@res]" ]);
+
+    cmp_deeply(
+        \@verbose,
+        [
+            [1, $reason],
+            [1, "Result of filter_ppps: res[@res]"],
+        ]
+    );
   } else {
-    ok( ! $self->{dist}->called('verbose'), "no verbose() call");
-    ok(1, "dummy");
+    ok(!@verbose, "no verbose() call");
     $self->{dist}->clear;
   }
 }
 
 sub simile :Test :Plan(2) {
   my ($self, $file, $package, $ret) = @_;
+
+  my @verbose;
+  local $PAUSE::Config->{LOG_CALLBACK} = sub { shift; push @verbose, [@_] };
+
   my $label = "$file and $package are "
     . ($ret ? "" : "not ") . "similes";
   ok( $self->{pmfile}->simile($file, $package) == $ret, $label );
   $file =~ s/\.pm$//;
-  $self->{dist}->verbose_ok(
-    1, "simile: file[$file] package[$package] ret[$ret]\n"
+  cmp_deeply(
+      shift(@verbose),
+      [1, "Result of simile(): file[$file] package[$package] ret[$ret]\n"],
   );
 }
 
 sub examine_fio :Test :Plan(3) {
   my ($self) = @_;
   my $pmfile = $self->{pmfile};
+
+  my @verbose = ();
+  local $PAUSE::Config->{LOG_CALLBACK} = sub { shift; push @verbose, [@_] };
+
   $pmfile->{PMFILE} = $self->fake_dist_dir->file('lib/My/Dist.pm')->stringify;
   $pmfile->examine_fio;
-  $self->{dist}->next_call for 1..5; # skip over some irrelevant logging
+  shift @verbose for 1..3; # skip over some irrelevant logging
 #  $self->{dist}->next_call_ok(connect => []);
-#  $self->{dist}->next_call_ok(version_from_yaml_ok => []);
+#  $self->{dist}->next_call_ok(version_from_meta_ok => []);
 #  $self->{dist}->verbose_ok(1, "simile: file[Dist] package[My::Dist] ret[1]\n");
-#  $self->{dist}->verbose_ok(1, "no keyword 'no_index' or 'private' in YAML_CONTENT");
+#  $self->{dist}->verbose_ok(1, "no keyword 'no_index' or 'private' in META_CONTENT");
 #  $self->{dist}->verbose_ok(1, "res[My::Dist]");
-  $self->{dist}->verbose_ok(1, "will check keys_ppp[My::Dist]\n");
-  is_deeply(
-    [ @{$PACKAGE}{ qw(PACKAGE DIST FIO TIME PMFILE USERID YAML_CONTENT) } ],
+  cmp_deeply(
+      shift(@verbose),
+      [1, "Will check keys_ppp[My::Dist]\n"],
+  );
+  cmp_deeply(
+    [ @{$PACKAGE}{ qw(PACKAGE DIST FIO TIME PMFILE USERID META_CONTENT) } ],
     [
       'My::Dist', 'My-Dist', $pmfile,
-      @{$pmfile}{qw(TIME PMFILE USERID YAML_CONTENT)},
+      @{$pmfile}{qw(TIME PMFILE USERID META_CONTENT)},
     ],
     "correct package info",
   );
   delete $PACKAGE->{PP}{pause_reg}; # cannot guess
-  is_deeply(
+  cmp_deeply(
     $PACKAGE->{PP},
     {
       parsed => 1,
@@ -141,4 +163,37 @@ sub examine_fio :Test :Plan(3) {
   );
 }
 
+sub packages_per_pmfile :Test :Plan(3) {
+  my ($self,$pkg,$pm_content,$version) = @_;
+  # pass("playing around");
+  my $selfpmfile = $self->{pmfile};
+  my $pmfile = $self->fake_dist_dir->file('lib/My/Dist.pm')->stringify;
+  open my $fh, ">", $pmfile or die "Could not open > '$pmfile': $!";
+  print $fh $pm_content;
+  close $fh or die "Could not close > '$pmfile': $!";
+  $selfpmfile->{PMFILE} = $pmfile;
+  $selfpmfile->{MTIME} = "42";
+  $selfpmfile->{VERSION_FROM_META_OK} = 0;
+  # $selfpmfile->{VERSION} = $version;
+  my $ppp = $selfpmfile->packages_per_pmfile;
+  is ref $ppp, "HASH", "ppp is a HASH";
+  is join(" ",keys %$ppp), $pkg, "only key in ppp is '$pkg'";
+  delete $ppp->{$pkg}{pause_reg};
+  cmp_deeply(
+             $ppp->{$pkg},
+             { version => $version,
+               filemtime => 42,
+               infile => $pmfile,
+               simile => $pmfile,
+               parsed => 1,
+             },
+             "correct version in packages_per_pmfile: $version",
+            );
+}
+
 1;
+
+#Local Variables:
+#mode: cperl
+#cperl-indent-level: 2
+#End:

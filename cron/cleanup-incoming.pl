@@ -1,8 +1,7 @@
 #!/usr/local/bin/perl
 
-my $Id = q$Id$;
-
-use lib "/home/k/PAUSE/lib";
+use FindBin;
+use lib "$FindBin::Bin/../lib";
 use PAUSE ();
 use DBI;
 use File::Spec;

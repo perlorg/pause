@@ -1,6 +1,6 @@
 =head1 NAME
 
-main - 
+main -
 
 =head1 SYNOPSIS
 
@@ -60,11 +60,12 @@ the new perl.
 
 
 package pause_1999::main;
-use Apache::HeavyCGI; # This is much better than only second line
-                      # alone. If Apache::HeavyCGI is not available,
+use PAUSE::HeavyCGI; # This is much better than only second line
+                      # alone. If PAUSE::HeavyCGI is not available,
                       # the errormessage of the next line would be 'No
                       # such pseudo-hash field "R" in variable $self'
-use base Apache::HeavyCGI;
+use base PAUSE::HeavyCGI;
+use Sys::Hostname;
 # # use Apache::URI ();
 
  # use encoding "utf-8";
@@ -82,7 +83,7 @@ use vars qw($VERSION %entity2char $DO_UTF8);
 $VERSION = "854";
 
 $DO_UTF8 = 1;
-use Apache::Constants qw(:common);
+use HTTP::Status qw(:constants);
 require Unicode::String;
 use HTML::Entities;
 use String::Random ();
@@ -121,6 +122,7 @@ DownTime
 EditOutput
 HiddenUser
 IsMailinglistRepresentative
+IsSSL
 MailMailerConstructorArgs
 MailtoAdmins
 ModDsn
@@ -151,15 +153,15 @@ WillLast
 sub dispatch {
   my $self = shift;
   $self->init;
-  my $r = $self->{R};
-  warn sprintf "DEBUG: uri[%s]location[%s]", $r->uri, $r->location;
-  if ($r->uri =~ m|^/pause/query/|) { # path info?
+  my $req = $self->{REQ};
+  warn sprintf "DEBUG: uri[%s]location[%s]", $req->path, ''; # $r->location;
+  if ($req->path =~ m|^/pause/query/|) { # path info?
       warn "Warning: killing this request, it has a path_info, only bots have them";
-      return NOT_FOUND;
+      return HTTP_NOT_FOUND;
   }
   eval { $self->prepare; };
   if ($@) {
-    if (UNIVERSAL::isa($@,"Apache::HeavyCGI::Exception")) {
+    if (UNIVERSAL::isa($@,"PAUSE::HeavyCGI::Exception")) {
       if ($@->{ERROR}) {
         require Carp;
 	$@->{ERROR} = [ $@->{ERROR} ] unless ref $@->{ERROR};
@@ -174,12 +176,12 @@ sub dispatch {
       if ($self->{ERRORS_TO_BROWSER}) {
 	push @{$self->{ERROR}}, " ", $@;
       } else {
-	$self->{R}->log_error($@);
-	return SERVER_ERROR;
+	$req->logger->({level => 'error', message => $@ });
+	return HTTP_INTERNAL_SERVER_ERROR;
       }
     }
   }
-  return $self->{DONE} if $self->{DONE}; # backwards comp now, will go away
+  return $self->{RES}->finalize if $self->{DONE}; # backwards comp now, will go away
   $self->{CONTENT} = $self->layout->as_string($self);
   $self->finish;
   $self->deliver;
@@ -192,8 +194,8 @@ sub layout {
 
 sub can_gzip {
   my $self = shift;
-  my $r = $self->{R};
-  my $remote = $r->get_remote_host;
+  my $req = $self->{REQ};
+  # my $remote = $r->get_remote_host; <-- is not used now
   # Just for debugging, because Netscape doesn't show source on gzipped pages
   # if ($remote =~ /^62\.104\.4/ and $r->server->server_hostname =~ /^ak-/) {
   #   return $self->{CAN_GZIP} = 0;
@@ -214,7 +216,7 @@ sub can_utf8 {
   ##   an error response with the 406 (not acceptable) status code, though
   ##   the sending of an unacceptable response is also allowed.
 
-  my $acce = $self->{R}->header_in("Accept-Charset");
+  my $acce = $self->{REQ}->header("Accept-Charset");
   if (defined $acce){
     if ($acce =~ m|\butf-8\b|i){
       $self->{CAN_UTF8} = 1;
@@ -234,17 +236,24 @@ sub can_utf8 {
       warn "CAN_UTF8[$self->{CAN_UTF8}]uagent[$uagent]";
       return $self->{CAN_UTF8};
   }
-  my $protocol = $self->{R}->protocol || "";
-  my($major,$minor) = $protocol =~ m|HTTP/(\d+)\.(\d+)|;
-  $self->{CAN_UTF8} = $major >= 1 && $minor >= 1;
-  warn "CAN_UTF8[$self->{CAN_UTF8}]protocol[$protocol]uagent[$uagent]";
-  $self->{CAN_UTF8};
+  if (0) {
+      # since we have a perlbal this protocol check is turns UTF-8 off
+      # more often than in previous times and reveals that our
+      # solutions for non-utf-8 browsers do not work anymore.
+      # Disabling completely for now. May need reconsidering, but
+      # maybe UTF-8 works everywhere now...
+      my $protocol = $self->{REQ}->protocol || "";
+      my($major,$minor) = $protocol =~ m|HTTP/(\d+)\.(\d+)|;
+      $self->{CAN_UTF8} = $major >= 1 && $minor >= 1;
+      warn "CAN_UTF8[$self->{CAN_UTF8}]protocol[$protocol]uagent[$uagent]";
+  }
+  $self->{CAN_UTF8} = 1;
 }
 
 sub uagent {
   my $self = shift;
   return $self->{UserAgent} if defined $self->{UserAgent};
-  $self->{UserAgent} = $self->{R}->header_in('User-Agent');
+  $self->{UserAgent} = $self->{REQ}->header('User-Agent');
 }
 
 sub connect {
@@ -273,7 +282,7 @@ sub database_alert {
     $self->send_mail($header,$mess);
     open my $fh, ">", $tsf or warn "Could not open $tsf: $!";
   }
-  die Apache::HeavyCGI::Exception->new(ERROR => qq{
+  die PAUSE::HeavyCGI::Exception->new(ERROR => qq{
 Sorry, the PAUSE Database currently seems unavailable.<br />
 Administration has been notified.<br />
 Please try again later.
@@ -298,7 +307,7 @@ sub authen_connect {
 # breaks by setting it back to the previous state.
 
 # # sub myurl {
-# #   my Apache::HeavyCGI $self = shift;
+# #   my PAUSE::HeavyCGI $self = shift;
 # #   return $self->{MYURL} if defined $self->{MYURL};
 # #   my $r = $self->{R};
 # #   my $myurl = $r->parsed_uri;
@@ -315,11 +324,10 @@ sub authen_connect {
 sub myurl {
   my $self = shift;
   return $self->{MYURL} if defined $self->{MYURL};
-  use Apache::URI;
   use URI::URL;
-  my $r = $self->{R} or
+  my $req = $self->{REQ} or
       return URI::URL->new("http://localhost");
-  my $uri = Apache::URI->parse($r);
+  my $uri = $req->uri;
 
   # use Data::Dumper;
   # warn "subprocess_env[".Data::Dumper::Dumper(scalar $r->subprocess_env)."]";
@@ -333,18 +341,34 @@ sub myurl {
   #### On. You don't need it anyway, because $uri->scheme seems to
   #### work OK.
 
-  my $Hhostname = $r->headers_in->get('Host');
-  my $hostname = $uri->hostname();
+  my $Hhostname = $req->header('Host');
+  my $hostname = $uri->host();
   warn "hostname[$hostname]Hhostname[$Hhostname]";
   # $uri->hostname($Hhostname); # contains :8443!!!!!
 
-  my $rpath = $uri->rpath;
-  $uri->path($rpath);
-  warn sprintf "DEBUG: uri[%s]location[%s]", $uri, $r->location;
+  # my $rpath = $uri->rpath;
+  # $uri->path($rpath);
+  warn sprintf "DEBUG: uri[%s]location[%s]", $uri, ""; # $r->location;
 
   # XXX should have additional test if we are on pause
-  if ($uri->port == 81 and $PAUSE::Config->{HAVE_PERLBAL}) {
-      $uri->port(80);
+  if (( $uri->port == 81 || $uri->port == 12081 )
+      and $PAUSE::Config->{HAVE_PERLBAL}
+     ) {
+      if ($self->is_ssl($uri)) {
+          $uri->port(443);
+          $uri->scheme("https");
+      } else {
+          $uri->port(80);
+          $uri->scheme("http");
+      }
+      my($hh,$hport);
+      if ($Hhostname =~ /([^:]+):(\d+)/) {
+          ($hh,$hport) = ($1,$2);
+          $uri->port($hport);
+      } else {
+          $hh = $Hhostname;
+      }
+      $uri->host($hh);
   }
 
   # my $port = $r->server->port || 80;
@@ -354,7 +378,24 @@ sub myurl {
   #				 $r->server->server_hostname .
   #				 $explicit_port .
   #				 $script_name);
+  $uri->host($PAUSE::Config->{SERVER_NAME}) if $PAUSE::Config->{SERVER_NAME};
   $self->{MYURL} = $uri;
+}
+
+# the argument $uri is important to prevent recursion between myurl
+# and is_ssl
+sub is_ssl {
+    my($self, $uri) = @_;
+    return $self->{IsSSL} if defined $self->{IsSSL};
+    my $is_ssl = 0;
+    $uri ||= $self->myurl;
+    if ($uri->scheme eq "https") {
+        $is_ssl = 1;
+    } elsif (Sys::Hostname::hostname() =~ /pause2/) {
+        my $header = $self->{REQ}->header("X-pause-is-SSL") || 0;
+        $is_ssl = !!$header;
+    }
+    return $self->{IsSSL} = $is_ssl;
 }
 
 sub file_to_user {
@@ -387,8 +428,7 @@ sub send_mail {
   warn "constructing mailer with args[@args]";
   my $mailer = Mail::Mailer->new(@args);
 
-  my $r = $self->{R};
-  my @hdebug = %$header; $r->log_error(sprintf("hdebug[%s]", join "|", @hdebug));
+  my @hdebug = %$header; $self->{REQ}->logger({level => 'error', message => sprintf("hdebug[%s]", join "|", @hdebug) });
   $header->{From}                        ||= $self->{OurEmailFrom};
   $header->{"Reply-To"}                  ||= join ", ", @{$PAUSE::Config->{ADMINS}};
 
@@ -442,7 +482,7 @@ sub finish {
 
   if ($self->can_utf8) {
   } else {
-    warn sprintf "DEBUG: using Unicode::String uri[%s]gmtime[%s]", $self->{R}->uri, scalar gmtime();
+    warn sprintf "DEBUG: using Unicode::String uri[%s]gmtime[%s]", $self->{REQ}->uri, scalar gmtime();
     my $ustr = Unicode::String::utf8($self->{CONTENT});
     $self->{CONTENT} = $ustr->latin1;
     $self->{CHARSET} = "ISO-8859-1";
@@ -482,7 +522,7 @@ sub text_pw_field {
   my $name = $arg{name} || "";
   my $fieldtype = $arg{FIELDTYPE};
 
-  my $req = $self->{CGI};
+  my $req = $self->{REQ};
   my $val;
   if ($fieldtype eq "FILE") {
     if ($req->can("upload")) {
@@ -543,7 +583,7 @@ sub checkbox {
   my $value;
   defined($value = $arg{value}) or ($value = "on");
   my $checked;
-  my @sel = $self->{CGI}->param($name);
+  my @sel = $self->{REQ}->param($name);
   if (@sel) {
     for (@sel) {
       if ($_ eq $value) {
@@ -568,7 +608,7 @@ sub radio_group {
   my $name = $arg{name};
   my $value;
   my $checked;
-  my $sel = $self->{CGI}->param($name);
+  my $sel = $self->{REQ}->param($name);
   my $haslabels = exists $arg{labels};
   my $values = $arg{values} or Carp::croak "radio_group called without values";
   defined($checked = $arg{checked})
@@ -606,7 +646,7 @@ sub checkbox_group {
   my($self,%arg) = @_;
 
   my $name = $arg{name};
-  my @sel = $self->{CGI}->param($name);
+  my @sel = $self->{REQ}->param($name);
   unless (@sel) {
     if (exists $arg{default}) {
       my $default = $arg{default};
@@ -651,7 +691,7 @@ sub scrolling_list {
   my $haslabels = exists $arg{labels};
   my $name = $arg{name};
   # warn "name[$name]CGI[$self->{CGI}]";
-  my @sel = $self->{CGI}->param($name);
+  my @sel = $self->{REQ}->param($name);
   if (!@sel && exists $arg{default} && defined $arg{default}) {
     my $d = $arg{default};
     @sel = ref $d ? @$d : $d;
@@ -690,7 +730,7 @@ sub escapeHTML {
 sub can_multipart {
   my $self = shift;
   return $self->{CanMultipart} if defined $self->{CanMultipart};
-  my $req = $self->{CGI};
+  my $req = $self->{REQ};
   my $can = $req->param('CAN_MULTIPART'); # no guessing, no special casing
   $can = 1 unless defined $can; # default
   $self->{CanMultipart} = $can;
@@ -704,6 +744,8 @@ sub need_multipart {
 }
 
 sub prefer_post {
+  return 1; # Because we should always prefer post now
+
   my $self = shift;
   my $set = shift;
   $self->{PreferPost} = $set if defined $set;
@@ -762,7 +804,7 @@ sub decode_highbit_entities {
 
 sub textarea {
   my($self,%arg) = @_;
-  my $req = $self->{CGI};
+  my $req = $self->{REQ};
   my $name = $arg{name} || "";
   my $val  = $req->param($name) || $arg{default} || $arg{value} || "";
   my($r)   = exists $arg{rows} ? qq{ rows="$arg{rows}"} : '';
@@ -791,8 +833,8 @@ sub DESTROY {
 sub session {
   my $self = shift;
   return $self->{Session} if defined $self->{Session};
-  my $cgi = $self->{CGI};
-  my $sid = $cgi->param('USERID'); # may fail
+  my $req = $self->{REQ};
+  my $sid = $req->param('USERID'); # may fail
   my %session;
   require Apache::Session::Counted;
   # XXX date string into CounterFile!
@@ -932,7 +974,7 @@ sub version {
   my($self) = @_;
   return $self->{VERSION} if defined $self->{VERSION};
   my $version = $VERSION;
-  for my $m (grep /pause_1999/, keys %INC) {
+  for my $m (grep {! m!/Test/!} grep /pause_1999/, keys %INC) {
     $m =~ s|/|::|g;
     $m =~ s|\.pm$||;
     my $v = $m->VERSION || 0;

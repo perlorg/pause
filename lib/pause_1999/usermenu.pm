@@ -9,8 +9,8 @@ our $VERSION = "854";
 sub as_string {
   my $self = shift;
   my $mgr = shift;
-  my $r = $mgr->{R};
-  my $user = $r->connection->user;
+  my $req = $mgr->{REQ};
+  my $user = $req->user;
   my $myurl = $mgr->myurl;
   my $server = $myurl->can("host") ? $myurl->host : $myurl->hostname;
   if (my $port = $myurl->port) {
@@ -21,19 +21,19 @@ sub as_string {
   }
 
   if (0) {
-    $r->log_error(sprintf(
+    $req->logger->({level => 'error', message => sprintf(
                           "Watch: server[%s]at[%s]line[%d]",
                           $server,
                           __FILE__,
                           __LINE__,
-                         ));
+                         )});
   }
   my @m;
   push @m, qq{<table width="155" cellspacing="1" cellpadding="0">};
   my $activecolor = $mgr->{ActiveColor};
   unless ($user) {
     push @m, qq{<tr><td class="menuitem">};
-    if ($mgr->{R}->server->port == 8000) {
+    if ($mgr->{REQ}->port == 8000) {
       $server =~ s/:8000/:8443/ or $server .= ":8443";
     }
     my $schema = "https";
@@ -103,16 +103,16 @@ sub as_string {
       my $activecol2 = "";
       if ($action eq $mgr->{Action}) {
 	$class = "activemenu";
-        # $activemarkerleft = "\x{21d2}&nbsp;"; # Pfeil
+        # $activemarkerleft = "\x{21d2}&#160;"; # Pfeil
 
-        $activemarkerleft = "&gt; "; # : "\x{25b6}&nbsp;"; # Dreieck
+        $activemarkerleft = "&gt; "; # : "\x{25b6}&#160;"; # Dreieck
 
         #### IE6 alert. If I send this \x{25b6} with 5.6.1, then IE6
         #### cannot display a single page, as "Gregor Mosheh, B.S."
         #### <stigmata@blackangel.net> reported.
 
-        # $activemarkerleft = "\x{266c}&nbsp;"; # 2 Sechzehntelnoten
-        # $activemarkerleft = "\x{300b}&nbsp;"; # hohes Zeichen wie ">>"
+        # $activemarkerleft = "\x{266c}&#160;"; # 2 Sechzehntelnoten
+        # $activemarkerleft = "\x{300b}&#160;"; # hohes Zeichen wie ">>"
         # $activemarkerright = "\x{21d0}";
         $activecol2 = ""; # "\x{25c0}";
       } else {

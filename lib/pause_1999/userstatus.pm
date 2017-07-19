@@ -9,16 +9,16 @@ our $VERSION = "946";
 sub as_string {
   my $self = shift;
   my $mgr = shift;
-  my $r = $mgr->{R};
-  my $user = $r->connection->user;
+  my $req = $mgr->{REQ};
+  my $user = $req->user;
   my $server = $mgr->myurl->can("host") ? $mgr->myurl->host : $mgr->myurl->hostname;
-  # $r->log_error(sprintf "Watch: server[%s]at[%s]line[%d]", $server, __FILE__, __LINE__);
+  # $req->logger->({level => 'error', message => sprintf "Watch: server[%s]at[%s]line[%d]", $server, __FILE__, __LINE__});
   my $activecolor = $mgr->{ActiveColor};
   return unless $user && $user ne "-";
   my @m;
   push @m, qq{<table  cellpadding="3" cellspacing="0">};
   my($encr,$class);
-  if ($mgr->myurl->scheme eq "https") {
+  if ($mgr->is_ssl) {
     $encr = 1;
     $class = "statusencr";
   } else {

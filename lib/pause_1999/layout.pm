@@ -1,7 +1,7 @@
 #!/usr/bin/perl -- -*- Mode: cperl; coding: utf-8; -*-
 package pause_1999::layout;
 use base 'Class::Singleton';
-use Apache::HeavyCGI::Layout;
+use PAUSE::HeavyCGI::Layout;
 use pause_1999::main;
 use strict;
 our $VERSION = "994";
@@ -28,7 +28,7 @@ sub layout {
     }
     push @l, qq{<!DOCTYPE html
                  PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
-                 "DTD/xhtml1-transitional.dtd">};
+                 "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">};
   }
   push @l, qq{<html xmlns="http://www.w3.org/1999/xhtml"><head><title>};
   push @l, $PAUSE::Config->{TESTHOST} ? qq{pause\@home: } : qq{PAUSE: };
@@ -83,9 +83,9 @@ $hspecial
 
     push @l, qq{when you run into problems try <a
     class="versionspecial"
-    href="https://pause.perl.org:8443/pause/authenquery">Port&nbsp;8443&nbsp;(https)</a>,
+    href="https://pause.perl.org:8443/pause/authenquery">Port&#160;8443&#160;(https)</a>,
     where perl 5.8.7 should be running (or <a class="versionspecial"
-    href="http://pause.perl.org:8000/pause/query">Port&nbsp;8000</a>
+    href="http://pause.perl.org:8000/pause/query">Port&#160;8000</a>
     if you need http).</p>};
 
   }
@@ -110,7 +110,7 @@ work. The estimated downtime is $willlast_dur.</p>}; #};
                                       # here, it currently is always
                                       # ANDK
 
-    my $closed_text = $mgr->{R}->notes("CLOSED");
+    my $closed_text = $mgr->{REQ}->env->{'psgix.notes'}{CLOSED};
 
     push @l, qq{<div align="center"> <p class="motd">Hi $user, you
 see the site now <b>but it is closed for maintainance</b>.
@@ -135,7 +135,7 @@ users get the following text:</p> $closed_text </div>};
     push @l, $mgr->instance_of("pause_1999::usermenu");
 
     push @l, qq{</td><td valign="top" bgcolor="red"\n>};
-    push @l, qq{&nbsp;};
+    push @l, qq{&#160;};
     push @l, qq{</td><td valign="top">};
     push @l, $mgr->instance_of("pause_1999::edit");
     push @l, qq{</td></tr></table>\n};
@@ -144,7 +144,7 @@ users get the following text:</p> $closed_text </div>};
   push @l, qq{<hr noshade="noshade" />};
   push @l, $mgr->instance_of("pause_1999::speedlinkgif");
   push @l, qq{</body></html>\n};
-  Apache::HeavyCGI::Layout->new(@l);
+  PAUSE::HeavyCGI::Layout->new(@l);
 }
 
 1;

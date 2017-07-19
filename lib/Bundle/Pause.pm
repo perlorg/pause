@@ -18,6 +18,7 @@ perl -MCPAN -e 'install Bundle::Snapshot_1996_09_29_00'
 
 accessors
 
+LWP::Protocol::https
 LWP::UserAgent
 BSD::Resource
 CGI
@@ -28,29 +29,45 @@ CPAN::Indexer::Mirror
 Class::Singleton -- lexikon
 Compress::Zlib
 Convert::BER
+Crypt::Eksblowfish::Bcrypt
 DBD::mysql
 DBI
+DBIx::RunSQL
 DB_File::Lock
 Email::Address
+Email::MIME
+Email::Sender::Simple
 Encode::MIME::Header
 File::Rsync
 File::Rsync::Mirror::Recent
+Filesys::Df
+Git::Wrapper
+IO::AIO
+IO::Socket::SSL
 IPC::Run3
 JSON
 JSON::XS
 List::MoreUtils
 List::Pairwise
-MD5
+Digest::MD5
 Module::Faker::Dist
+MooseX::StrictConstructor
+Parse::CPAN::Packages
+Perlbal
+Perlbal::XS::HTTPHeaders
+Perlbal::Plugin::TrustHeader
+Perlbal::Plugin::Addheader
 Set::Crontab
 String::Random
 Sub::Uplevel
 Test::Exception
+Test::FITesque::Fixture
 Text::Unidecode
 Time::Duration
 Time::HiRes
 Time::Period
 Unicode::String -- Apache::HeavyCGI
+V
 XML::Parser
 XML::SAX::Expat
 XML::SAX::Writer
@@ -59,113 +76,55 @@ YAML::Syck
 YAML::XS
 
 
-DBI
-
 Data::Dumper 2.02
-
 Data::ShowTable
-
 Devel::Symdump 1.21
-
 ExtUtils::MakeMaker 5.38
-
 ExtUtils::Manifest 1.27
-
 File::CounterFile 0.08
-
 HTML::HeadParser
-
 HTML::FormatText
-
 IO::File 1.03
-
 IO::Handle 1.09
-
 IO::Pipe 1.04
-
 IO::Seekable 1.04
-
 MIME::Base64 1.07
-
 LWP 5.01
-
-MD5 1.7
-
 MIME::QuotedPrint 1.09
-
 MIME::Base64
-
-
 Text::Format
-
-
 Mail::Address 1.08
-
 Mail::Alias 1.03
-
 Mail::Cap 1.03
-
 Mail::Field 1.02
-
 Mail::Header 1.01
-
 Mail::Internet 1.23
-
 Mail::Mailer 1.07
-
 Mail::Send 1.04
-
 Mail::Util 1.10
-
 Net::Cmd 2.00
-
 Net::Domain 2.00
-
 Net::FTP 2.00
-
 Net::NNTP 2.00
-
 Net::Netrc 2.00
-
 Net::POP3 2.00
-
 Net::Ping 1.01
-
 Net::SMTP 2.00
-
 Net::Telnet 2.00
-
 Net::Time 2.00
-
 Proc::Simple 1.12
-
 Term::ReadKey 0
-
 Term::ReadLine::Perl 
-
 Text::Metaphone
-
 Text::Tabs 96.051501000000002
-
 Text::Wrap 96.041801000000007
-
 URI::URL 4.05
-
-
-
 Image::Size -- OReilly
-
 LockFile::Simple -- OReilly
-
 XML::LibXML -- OReilly
-
 XML::LibXSLT -- OReilly
-
 XML::Simple
-
-
 BerkeleyDB
-
 Apache
 Apache::AuthDBI
 Apache::Session

@@ -1,4 +1,4 @@
-#!/usr/local/bin/perl -w
+#!/usr/local/bin/perl
 
 =head1 NAME
 
@@ -25,6 +25,16 @@ grep {s/^=item\s+//}
 
 Spits out noise about used memory
 
+=item B<--help|h>
+
+This help
+
+=item B<--symlinkinventory!>
+
+If set, we recalculate all symlinks below
+modules/by-{modules,category}, otherwise we only care for new
+symlinks. Inefficient, expensive run: on 2013-01-26 it took 75 minutes
+
 =item B<--skip-locking!>
 
 skip locking (e.g. reindex if already indexed)
@@ -40,6 +50,12 @@ distro is a full path
 =item B<--rewrite!>
 
 do not index, only rewrite the index files
+
+=item B<--fail-silently-on-concurrency-protection!>
+
+When we fail because some other instance of this job is already
+running, we often do not want to see an error message because we are a
+cronjob. If this option is true, we exit instead.
 
 =item B<--sleep=i>
 
@@ -60,7 +76,8 @@ Setting testhost prevents sending mail; automatically sets skip-locking too.
 =cut
 
 use strict;
-use lib "/home/k/PAUSE/lib";
+use FindBin;
+use lib "$FindBin::Bin/../lib";
 use PAUSE::mldistwatch ();
 
 use Getopt::Long ();
@@ -75,14 +92,17 @@ MAIN: {
                              \%Opt,
                              @opt,
                             ) or pod2usage(1);
+    if ($Opt{help}) {
+        pod2usage(0);
+    }
     if ($Opt{testhost}) {
         $Opt{"skip-locking"} = 1;
     }
     my $mldw = PAUSE::mldistwatch->new(\%Opt);
     if ($Opt{rewrite}) {
-        $mldw->work2;
+        $mldw->rewrite_indexes;
     } else {
-        $mldw->work;
+        $mldw->reindex;
     }
 }
 

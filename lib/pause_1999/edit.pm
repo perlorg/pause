@@ -4,13 +4,14 @@ package pause_1999::edit;
 use base 'Class::Singleton';
 use pause_1999::main;
 use strict;
-use Apache::Table ();
 use Encode ();
 use Fcntl qw(O_RDWR O_RDONLY);
 use File::Find qw(find);
+use PAUSE::Crypt;
 use POSIX ();
 use URI::Escape;
 use Text::Format;
+use HTTP::Status qw(:constants);
 eval {require Time::Duration};
 our $HAVE_TIME_DURATION = !$@;
 
@@ -26,7 +27,7 @@ our $strict_chapterid = 1;
 sub parameter {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my($param,@allow_submit,%allow_action);
 
   # What is allowed here is allowed to anybody
@@ -39,6 +40,7 @@ sub parameter {
      "pause_namingmodules",
      "request_id",
      "who_pumpkin",
+     "who_admin",
     )} = ();
 
   @allow_submit = (
@@ -55,9 +57,9 @@ sub parameter {
 		     "change_passwd",
 		     "delete_files",
 		     "edit_cred",
-		     "edit_mod",
+		     # "edit_mod",
 		     "edit_uris",
-		     "apply_mod",
+		     # "apply_mod",
                      "pause_logout",
                      "peek_perms",
                      "reindex",
@@ -75,8 +77,9 @@ sub parameter {
       for my $command (
 		       "select_ml_action",
 		       "edit_ml",
-		       "edit_mod",
-                       "reset_version"
+		       # "edit_mod",
+                       "reset_version",
+                       "show_ml_repr",
 		      ) {
 	$allow_action{$command} = undef;
 	push @allow_submit, $command;
@@ -84,7 +87,7 @@ sub parameter {
     }
 
     # Only Modulelist Maintainers
-    if (exists $mgr->{UserGroups}{modmaint}) {
+    if (0 && exists $mgr->{UserGroups}{modmaint}) {
       for my $command (
 		       "add_mod",
                        "apply_mod",
@@ -116,8 +119,8 @@ sub parameter {
 		       "edit_ml",
 		       "select_user",
 		       "show_ml_repr",
-                       "add_mod", # all admins may maintain the module list for now
-                       "apply_mod",
+                       # "add_mod", # all admins may maintain the module list for now
+                       # "apply_mod",
                        "check_xhtml",
                        "coredump",
                        "dele_message",
@@ -162,10 +165,10 @@ sub parameter {
       # TUT: Let's pretend they requested change_passwd. I guess, if we
       # would drop that line, it would still work, but I like redundant
       # coding in such cases
-      $param = $req->param("ACTION","change_passwd"); # override
+      $param = $req->parameters->set("ACTION","change_passwd"); # override
 
     } else {
-      die  Apache::HeavyCGI::Exception->new(ERROR => "You tried to authenticate the
+      die  PAUSE::HeavyCGI::Exception->new(ERROR => "You tried to authenticate the
 parameter ABRA=$param, but the database doesn't know about this token.");
     }
     $allow_action{"mailpw"} = undef;
@@ -206,7 +209,7 @@ parameter ABRA=$param, but the database doesn't know about this token.");
       if (
 	  $param = $req->param("pause99_$action\_1")
 	 ) {
-	$req->param("pause99_$action\_sub", $param); # why?
+	$req->parameters->set("pause99_$action\_sub", $param); # why?
 	$mgr->{Action} = $action;
 	last ACTION;
       }
@@ -217,7 +220,7 @@ parameter ABRA=$param, but the database doesn't know about this token.");
 
       my(@partial) = grep /^pause99_\Q$action\E_/, $req->param;
     PART: for my $partial (@partial) {
-	$req->param("pause99_$action\_sub", $partial); # why not $mgr->{ActionComment}?
+	$req->parameters->set("pause99_$action\_sub", $partial); # why not $mgr->{ActionComment}?
 	$mgr->{Action} = $action;
 	last PART;
       }
@@ -247,9 +250,9 @@ parameter ABRA=$param, but the database doesn't know about this token.");
   }
   $action = $mgr->{Action};
   # warn "action[$action]";
-  # warn sprintf "param[%s]", join ":", $mgr->{CGI}->param;
+  # warn sprintf "param[%s]", join ":", $mgr->{REQ}->param;
   if ($action) { # delegate to a subroutine
-    die Apache::HeavyCGI::Exception->new(ERROR => "Unanticipated Error on Server.
+    die PAUSE::HeavyCGI::Exception->new(ERROR => "Unanticipated Error on Server.
 Please report to the administrator what you were trying to do")
 	unless $self->can($action);
     my @action_result = $self->$action($mgr);
@@ -273,7 +276,7 @@ sub manage_id_requests { # was reject_id_request
   my $self = shift;
   my $mgr = shift;
   return unless exists $mgr->{UserGroups}{admin};
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my @m;
   my %ALL;
   my $delete;
@@ -333,7 +336,7 @@ push @m, qq{<p>View all pending applications for new user IDs and for modules re
   my $jx = JSON::XS->new->indent->canonical;
   for my $k (sort { $ALL{$b}{type} cmp $ALL{$a}{type} || $ALL{$b}{mtime} <=> $ALL{$a}{mtime} } keys %ALL) {
     my $esc = $mgr->escapeHTML($jx->encode($ALL{$k}{session}));
-    $esc =~ s/ /&nbsp;/g;
+    $esc =~ s/ /&#160;/g;
     $esc =~ s/\n/<br\/>/g;
     $esc =~ s/\\n/<br\/>/g;
     push @m, sprintf
@@ -449,8 +452,7 @@ sub active_user_record {
                                                # is authenticated or
                                                # harmless (mailpw)
 
-  my $req = $mgr->{CGI};
-  my $r = $mgr->{R};
+  my $req = $mgr->{REQ};
   if ($hidden_user) {
     require Carp;
     Carp::cluck("hidden_user[$hidden_user] passed in as argument with hidden_user_ok[$hidden_user_ok]");
@@ -462,19 +464,19 @@ sub active_user_record {
   {
     my $uc_hidden_user = uc $hidden_user;
     unless ($uc_hidden_user eq $hidden_user) {
-      $r->log_error("Warning: Had to uc the hidden_user $hidden_user");
+      $req->logger->({level => 'error', message => "Warning: Had to uc the hidden_user $hidden_user" });
       $hidden_user = $uc_hidden_user;
     }
   }
   my $u = {};
-  $r->log_error(sprintf("Watch: mgr/User/userid[%s]hidden_user[%s]mgr/UserGroups[%s]caller[%s]where[%s]",
+  $req->logger->({level => 'error', message => sprintf("Watch: mgr/User/userid[%s]hidden_user[%s]mgr/UserGroups[%s]caller[%s]where[%s]",
                         $mgr->{User}{userid},
                         $hidden_user,
                         join(":", keys %{$mgr->{UserGroups}}),
                         join(":", caller),
                         __FILE__.":".__LINE__,
                        )
-               );
+               });
   if (
       $hidden_user
       &&
@@ -495,7 +497,7 @@ sub active_user_record {
                           $sth1->rows,
                           $sth1->rows,
                          ));
-      die Apache::HeavyCGI::Exception
+      die PAUSE::HeavyCGI::Exception
           ->new(ERROR =>
                 "Unidentified error happened, please write to the PAUSE admin
  at $PAUSE::Config->{ADMIN} and help him identifying what's going on. Thanks!");
@@ -534,7 +536,7 @@ sub active_user_record {
           warn "Watch: privilege escalation";
 	  $u = $hiddenuser_h1; # no secrets for a mailinglist
 	} else {
-	  die Apache::HeavyCGI::Exception
+	  die PAUSE::HeavyCGI::Exception
 	      ->new(ERROR =>
 		    sprintf(
 			    qq[Action '%s' seems not to be supported
@@ -593,7 +595,7 @@ sub active_user_record {
       my $dbh1 = $mgr->connect;
       my $sth1 = $dbh1->prepare("SELECT * FROM users WHERE userid=?");
       $sth1->execute($mgr->{User}{userid});
-      die Apache::HeavyCGI::Exception
+      die PAUSE::HeavyCGI::Exception
           ->new(ERROR =>
                 "Unidentified error happened, please write to the PAUSE admin
  at $PAUSE::Config->{ADMIN} and help them identify what's going on. Thanks!")
@@ -612,7 +614,7 @@ sub active_user_record {
 sub edit_cred {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my($u,$nu); # user, newuser
   my @m = "\n";
   $u = $self->active_user_record($mgr);
@@ -787,7 +789,7 @@ sub edit_cred {
           # set asciiname to empty if it equals fullname
           my $wantfullname = $req->param("pause99_edit_cred_fullname");
           if ($wantfullname eq $wantasciiname) {
-            $req->param("pause99_edit_cred_asciiname", "");
+            $req->parameters->set("pause99_edit_cred_asciiname", "");
           }
         }
       } else {
@@ -797,7 +799,7 @@ sub edit_cred {
           require Text::Unidecode;
           $wantfullname = $mgr->any2utf8($wantfullname);
           $wantasciiname = Text::Unidecode::unidecode($wantfullname);
-          $req->param("pause99_edit_cred_asciiname", $wantasciiname);
+          $req->parameters->set("pause99_edit_cred_asciiname", $wantasciiname);
         }
       }
     }
@@ -849,7 +851,7 @@ sub edit_cred {
           if ( $u->{"ustatus"} eq "active" ) {
             next;
           } elsif (!$req->param($form_field)) {
-            $req->param($form_field,"unused");
+            $req->parameters->set($form_field,"unused");
           }
         }
 	# $s is the value they entered
@@ -860,7 +862,7 @@ sub edit_cred {
         $s =~ s/^\s+//;
         $s =~ s/\s+\z//;
         if ($s ne $s_raw) {
-          $req->param($form_field,$s);
+          $req->parameters->set($form_field,$s);
         }
 	$nu->{$field} = $s;
         $u->{$field} = "" unless defined $u->{$field};
@@ -871,11 +873,12 @@ sub edit_cred {
 	  # No UTF8 running before we have the system walking
 	  #	my $utf = $mgr->formfield_as_utf8($s);
 	  #	unless ( $s eq $utf ) {
-	  #	  $req->param($form_field, $utf);
+	  #	  $req->parameters->set($form_field, $utf);
 	  #	  $s = $utf;
 	  #	}
 	  #	next if $mgr->{User}{$field} eq $s;
 
+	  # not ?-ising this as rely on quote() method
 	  push @set, "$field = " . $dbh->quote($s);
 	  $mb = sprintf($mailsprintf1,
                         $field,
@@ -900,9 +903,10 @@ sub edit_cred {
       }
       if (@set) {
 
+	my @query_params = ($now, $mgr->{User}{userid}, $u->{userid});
 	my $sql = "UPDATE $table SET " . ####
-	    join(", ", @set, "changed = '$now', changedby='$mgr->{User}{userid}'") .
-		" WHERE $column = '$u->{userid}'"; ####
+	    join(", ", @set, "changed = ?, changedby=?") .
+		" WHERE $column = ?"; ####
 	my $mailblurb = qq{Record update in the PAUSE users database:
 
 };
@@ -918,7 +922,7 @@ The Pause
 };
 	# warn "sql[$sql]mailblurb[$mailblurb]";
 	# die;
-	if ($dbh->do($sql)) {
+	if ($dbh->do($sql, undef, @query_params)) {
 	  push @m, qq{The new data are registered in table $table.<hr />};
 	  $nu = $self->active_user_record($mgr,$u->{userid});
 	  if ($nu->{userid} && $nu->{userid} eq $mgr->{User}{userid}) {
@@ -946,8 +950,13 @@ The Pause
 	}
       }
     } # end of quid loop
-
-    unless ($saw_a_change) {
+    if ($saw_a_change) {
+      # expire temporary token to free mailpw for immediate use
+      my $sql = sprintf qq{DELETE FROM abrakadabra
+              WHERE user = ?};
+      my $dbh = $mgr->authen_connect();
+      $dbh->do($sql,undef,$u->{userid});
+    } else {
       push @m, qq{No change seen, nothing done.<hr />};
     }
   }
@@ -985,12 +994,12 @@ sub select_user {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   $mgr->prefer_post(0);
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   if (my $action = $req->param("ACTIONREQ")) {
     if (
 	$self->can($action)
        ) {
-      $req->param("ACTION",$action);
+      $req->parameters->set("ACTION",$action);
       $mgr->{Action} = $action;
       return $self->$action($mgr);
     } else {
@@ -1040,7 +1049,7 @@ should be.
 sub select_ml_action {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my $dbh = $mgr->connect;
   if (my $action = $req->param("ACTIONREQ")) {
     if (
@@ -1048,7 +1057,7 @@ sub select_ml_action {
 	&&
         grep { $_ eq $action } @{$mgr->{AllowMlreprTakeover}}
        ) {
-      $req->param("ACTION",$action);
+      $req->parameters->set("ACTION",$action);
       $mgr->{Action} = $action;
       return $self->$action($mgr);
     } else {
@@ -1159,11 +1168,10 @@ sub show_document {
   my $mgr = shift;
   my $doc = shift || "04pause.html";
   my $rewrite = shift || 0;
-  my $r = $mgr->{R};
-  my $dir = $r->document_root;
+  my $dir = $FindBin::Bin;
   my @m;
   # push @m, sprintf "DEBUG: %s %s<br />", $dir, -e $dir ? "exists" : "doesn't exist. ";
-  for my $subdir ("pause", "pause/../htdocs", "pause/..", "") {
+  for my $subdir ("htdocs", "pause", "pause/../htdocs", "pause/..", "") {
     my $file = "$dir/$subdir/$doc";
     next unless -f $file;
     push @m, qq{<hr noshade="noshade" />};
@@ -1187,7 +1195,9 @@ sub show_document {
       my $f = pause_1999::saxfilter01->new(Handler => $w);
       my $p = XML::SAX::ParserFactory->parser(Handler => $f);
       $p->parse_string($html_in);
-      shift @html_out if $html_out[0] =~ /^<\?/; # remove the XML Declaration
+      while ($html_out[0] =~ /^<[\?\!]/){ # remove XML Declaration, DOCTYPE
+        shift @html_out;
+      }
       push @m, join "", @html_out;
     } else {
       my $html = $html_in;
@@ -1207,8 +1217,8 @@ sub show_document {
 sub tail_logfile {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
-  my $cgi = $mgr->{CGI};
-  my $tail = $cgi->param("pause99_tail_logfile_1") || 5000;
+  my $req = $mgr->{REQ};
+  my $tail = $req->param("pause99_tail_logfile_1") || 5000;
   my($file) = $PAUSE::Config->{PAUSE_LOG};
   if ($PAUSE::Config->{TESTHOST}) {
     $file = "/usr/local/apache/logs/error_log"; # for testing
@@ -1231,26 +1241,11 @@ sub tail_logfile {
   join "", @m;
 }
 
-sub salt () {
-  randchar(2);
-}
-
-my(@saltset) = (qw(. /), 0..9, "A".."Z", "a".."z");
-
-sub randchar ($) {
-  local($^W) = 0; #we get a bogus warning here
-  my($count) = @_;
-  my $str = "";
-  $str .= $saltset[int(rand(64))] while $count--;
-  $str;
-}
-
 sub change_passwd {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   $mgr->prefer_post(1);
-  my $req = $mgr->{CGI};
-  my $r = $mgr->{R};
+  my $req = $mgr->{REQ};
   my @m;
   my $u = $self->active_user_record($mgr);
   push @m, qq{<input type="hidden" name="HIDDENNAME" value="$u->{userid}" />};
@@ -1264,7 +1259,7 @@ sub change_passwd {
       if (my $pw2 = $req->param("pause99_change_passwd_pw2")) {
 	if ($pw1 eq $pw2) {
 	  # create a new crypted password, store it, report
-	  my $pwenc = crypt($pw1,salt());
+	  my $pwenc = PAUSE::Crypt::hash_password($pw1);
 	  my $dbh = $mgr->authen_connect;
 	  my $sql = qq{UPDATE $PAUSE::Config->{AUTHEN_USER_TABLE}
                        SET $PAUSE::Config->{AUTHEN_PASSWORD_FLD} = ?,
@@ -1276,7 +1271,7 @@ sub change_passwd {
 	  my $rc = $dbh->do($sql,undef,
 			    $pwenc,0,time,$mgr->{User}{userid},$u->{userid});
 	  warn "rc[$rc]";
-	  die Apache::HeavyCGI::Exception
+	  die PAUSE::HeavyCGI::Exception
 	      ->new(ERROR =>
 		    sprintf qq[Could not set password: '%s'], $dbh->errstr
 		   ) unless $rc;
@@ -1297,16 +1292,16 @@ sub change_passwd {
 			   $mgr->{User}{userid},
 			   $u->{userid}
 			  );
-	    die Apache::HeavyCGI::Exception
+	    die PAUSE::HeavyCGI::Exception
 		->new(ERROR =>
 		      sprintf qq[Could not insert user record: '%s'], $dbh->errstr
 		     ) unless $rc;
 	  }
           for my $anon ($mgr->{User}, $u) {
-            die Apache::HeavyCGI::Exception
+            die PAUSE::HeavyCGI::Exception
                 ->new(ERROR => "Panic: unknown user") unless $anon->{userid};
             next if $anon->{fullname};
-            $r->log_error("Unknown fullname for $anon->{userid}!");
+            $req->logger({level => 'error', message => "Unknown fullname for $anon->{userid}!" });
           }
 
 	  push @m, "New password stored and enabled. Be prepared that
@@ -1318,7 +1313,7 @@ sub change_passwd {
                                   qq{Password update on PAUSE:
 
 %s (%s) visited the
-password changer on PAUSE at %s GMT
+password changer on PAUSE at %s UTC
 and changed the password for %s (%s).
 
 No action is required, but it would be a good idea if somebody
@@ -1351,15 +1346,15 @@ The Pause
           my $header = {Subject => "Password Update"};
           $mgr->send_mail_multi(\@to, $header, $mailblurb);
 	} else {
-	  die Apache::HeavyCGI::Exception
+	  die PAUSE::HeavyCGI::Exception
               ->new(ERROR => "The two passwords didn't match.");
 	}
       } else {
-	die Apache::HeavyCGI::Exception
+	die PAUSE::HeavyCGI::Exception
             ->new(ERROR => "You need to fill in the same password in both fields.");
       }
     } else {
-      die Apache::HeavyCGI::Exception
+      die PAUSE::HeavyCGI::Exception
           ->new(ERROR => "Please fill in the form with passwords.");
     }
   } else {
@@ -1374,12 +1369,12 @@ The Pause
  proceed.</p>};
 
     push @m, $mgr->password_field(name=>"pause99_change_passwd_pw1",
-				  maxlength=>8,
-				  size=>8);
+				  maxlength=>72,
+				  size=>16);
     push @m, qq{\n};
     push @m, $mgr->password_field(name=>"pause99_change_passwd_pw2",
-				  maxlength=>8,
-				  size=>8);
+				  maxlength=>72,
+				  size=>16);
     push @m, qq{\n};
     push @m, qq{<input type="submit" name="pause99_change_passwd_sub"
     value="Submit" />};
@@ -1390,14 +1385,13 @@ The Pause
 sub add_uri {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
-  my $req = $mgr->{CGI};
-  my $debug_table = $req->parms;
+  my $req = $mgr->{REQ};
+  my $debug_table = $req->parameters; # XXX: $r->parms
   warn sprintf "DEBUG: req[%s]", join(":",%$debug_table);
-  my $r = $mgr->{R};
   $PAUSE::Config->{INCOMING_LOC} =~ s|/$||;
   my @m;
   my $u = $self->active_user_record($mgr);
-  die Apache::HeavyCGI::Exception
+  die PAUSE::HeavyCGI::Exception
       ->new(ERROR =>
             "Unidentified error happened, please write to the PAUSE admins
  at $PAUSE::Config->{ADMIN} and help them identifying what's going on. Thanks!")
@@ -1412,11 +1406,11 @@ sub add_uri {
 
   if ($req->param("SUBMIT_pause99_add_uri_HTTPUPLOAD")
       || $req->param("SUBMIT_pause99_add_uri_httpupload")) {
-    my $upl = $req->upload;
+    my $upl = $req->upload('pause99_add_uri_httpupload');
     unless ($upl->size) {
       warn "Warning: maybe they hit RETURN, no upload size, not doing HTTPUPLOAD";
-      $req->param("SUBMIT_pause99_add_uri_HTTPUPLOAD","");
-      $req->param("SUBMIT_pause99_add_uri_httpupload","");
+      $req->parameters->set("SUBMIT_pause99_add_uri_HTTPUPLOAD","");
+      $req->parameters->set("SUBMIT_pause99_add_uri_httpupload","");
     }
   }
   if (!   $req->param("SUBMIT_pause99_add_uri_HTTPUPLOAD")
@@ -1426,9 +1420,9 @@ sub add_uri {
      ) {
     # no submit button
     if ($req->param("pause99_add_uri_uri")) {
-      $req->param("SUBMIT_pause99_add_uri_uri", "2ndguess");
+      $req->parameters->set("SUBMIT_pause99_add_uri_uri", "2ndguess");
     } elsif ($req->param("pause99_add_uri_upload")) {
-      $req->param("SUBMIT_pause99_add_uri_upload", "2ndguess");
+      $req->parameters->set("SUBMIT_pause99_add_uri_upload", "2ndguess");
     }
   }
 
@@ -1453,19 +1447,19 @@ sub add_uri {
 	  $filename =~ s(.*:)()gs;      # no colon
 	  $filename =~ s/[^A-Za-z0-9_\-\.\@\+]//g; # only ASCII-\w and - . @ + allowed
 	  my $to = "$PAUSE::Config->{INCOMING_LOC}/$filename";
-	  my $fhi = $upl->fh;
+	  # my $fhi = $upl->fh;
 	  require File::Copy;
 	  if (-f $to && -s _ == 0) { # zero sized files are a common problem
 	    unlink $to;
 	  }
-	  if (File::Copy::copy($fhi, $to)){
+	  if (File::Copy::copy($upl->path, $to)){
 	    $uri = $filename;
 	    # Got an empty $to in the HTML page, so for debugging..
 	    my $h1 = qq{<h3>File successfully copied to '$to'</h3>};
 	    warn "h1[$h1]filename[$filename]";
 	    push @m, $h1;
 	  } else {
-	    die Apache::HeavyCGI::Exception
+	    die PAUSE::HeavyCGI::Exception
 		->new(ERROR =>
 		      "Couldn't copy file '$filename' to '$to': $!");
 	  }
@@ -1483,15 +1477,15 @@ filename[%s]. </p>
                              $dv->stringify($upl->filename),
                              $dv->stringify($filename)
                             );
-            $req->param("pause99_add_uri_httpupload",$filename);
+            $req->parameters->set("pause99_add_uri_httpupload",$filename);
           }
 	} else {
-	  die Apache::HeavyCGI::Exception
+	  die PAUSE::HeavyCGI::Exception
 	      ->new(ERROR =>
 		    "uploaded file was zero sized");
 	}
       } else {
-	die Apache::HeavyCGI::Exception
+	die PAUSE::HeavyCGI::Exception
 	    ->new(ERROR =>
 		  "Could not create an upload object. DEBUG: upl[$upl]");
       }
@@ -1515,7 +1509,7 @@ filename[%s]. </p>
 	  $uri = $filename;
 	  push @m, qq{<h3>File successfully copied to '$to'</h3>};
 	} else {
-	  die Apache::HeavyCGI::Exception
+	  die PAUSE::HeavyCGI::Exception
 	      ->new(ERROR =>
 		    "Couldn't copy file '$filename' to '$to': $!");
 	}
@@ -1525,19 +1519,19 @@ filename[%s]. </p>
     }
   } elsif ( $req->param("SUBMIT_pause99_add_uri_uri") ) {
     $uri = $req->param("pause99_add_uri_uri");
-    $req->param("pause99_add_uri_httpupload",""); # I saw spurious
+    $req->parameters->set("pause99_add_uri_httpupload",""); # I saw spurious
                                                   # nonsense in the
                                                   # field that broke
                                                   # XHTML
   } elsif ( $req->param("SUBMIT_pause99_add_uri_upload") ) {
     $uri = $req->param("pause99_add_uri_upload");
-    $req->param("pause99_add_uri_httpupload",""); # I saw spurious
+    $req->parameters->set("pause99_add_uri_httpupload",""); # I saw spurious
                                                   # nonsense in the
                                                   # field that broke
                                                   # XHTML
   }
   # my $myurl = $mgr->myurl;
-  my $server = $r->server->server_hostname;
+  my $server = $PAUSE::Config->{SERVER_NAME}; # XXX: $r->server->server_hostname
   my $dbh = $mgr->connect;
 
 
@@ -1546,17 +1540,6 @@ filename[%s]. </p>
     push @m, "\n\n<div class='noactionnoresponse'></div>\n\n";
   } else {
     push @m, $self->add_uri_continue_with_uri($mgr,$uri,\$success,\$didit);
-  }
-
-  if ( exists $mgr->{UserGroups}{pumpking} ) {
-    push @m, qq{\n<b>For pumpkings only</b>:};
-    push @m, $mgr->checkbox(
-			    name    => 'pause99_add_uri_mail_announce',
-			    checked => 0,
-			    value   => '1', # not more space in database than 1 byte
-			   );
-    push @m, "\nSend a CC of the Upload Notification to $PAUSE::Config->{P5P}";
-
   }
 
   push @m, qq{\n<!-- Preamble: By uploading material to the
@@ -1599,11 +1582,6 @@ filename[%s]. </p>
       href="http://blog.usarundbrief.com/?p=36">in his
       blog</a></td></tr>\n};
 
-  push @m, qq{<tr><td bgcolor="#ffff80"><b>FTP PUT + Confirmation via
-      form:</b> After you have transferred the file to the incoming
-      directory on $server: Click the filename.</td></tr>\n};
-
-
   push @m, qq{</table>\n <blockquote><b>Please,</b> make sure your filename
       contains a version number. For security reasons you will never
       be able to upload a file with the same name again (not even
@@ -1615,9 +1593,8 @@ filename[%s]. </p>
       topmost README file as, say, Foo-Bar-3.14.readme into your
       directory. <b>Hint:</b> if you're looking for an even more
       convenient way to upload files than this form, you can try the
-      <code>cpan-upload</code> script in <a
-      href="ftp://ftp.cpan.org/pub/CPAN/authors/id/N/NE/NEILB/scripts/">Neil
-      Bowers' directory</a>.</p>
+      <a href="http://search.cpan.org/dist/cpan-upload-http/">cpan-upload-http</a> script.
+      </p>
 
 }; #};
 
@@ -1634,7 +1611,13 @@ filename[%s]. </p>
                 subdirectory levels is allowed, they all will be
                 created on the fly if they don't exist yet. Only sane
                 directory names are allowed and the number of
-                characters for the whole path is limited.</p>};
+                characters for the whole path is limited.</p><p>
+                <b>NOTE</b>:  To upload a Perl6 distribution a target
+                directory whose top level subdirectory is "Perl6" must
+                be specified.  In addition, a Perl6 distribution must
+                contain a META6.json.  Pause will only consider it a
+                Perl6 dist if these two conditions are satisfied.
+                </p>};
 
 
     push @m, qq{<div align="center">};
@@ -1655,7 +1638,7 @@ filename[%s]. </p>
 
   if ($tryupload) {
     $mgr->need_multipart(1);
-    $r->header_out("Accept","*");
+    $mgr->{RES}->header("Accept","*");
 
     push @m, qq{<tr><td bgcolor="#e0ffff">If <b>your browser can handle
         file upload</b>, enter the filename here and I'll transfer it
@@ -1682,54 +1665,6 @@ filename[%s]. </p>
   push @m, "\n<br />";
   push @m, qq{<input type="submit" name="SUBMIT_pause99_add_uri_uri"
  value=' Upload this URL ' /></td></tr>\n};
-
-  # FROM FTP/INCOMING
-
-  push @m, qq{<tr><td bgcolor="#ffff80">If <b>you have already
-      uploaded</b> the file to PAUSE, click here, which file is
-      yours<br />};
-
-  require DirHandle;
-  my $dh = DirHandle->new;
-  $dh->open($PAUSE::Config->{INCOMING_LOC});
-  my @incom = ();
-  my %incom = ();
-  my $sth = $dbh->prepare("SELECT userid, uri, dgot FROM uris WHERE uri=?");
-  for ($dh->read) {
-    next if /^\./;
-    next if /[^\w\-\.\@\+]/; # filter illegal filenames, they might
-                             # disturb the XHTML (and do worse anyway)
-    next unless -f "$PAUSE::Config->{INCOMING_LOC}/$_";
-    push @incom, $_;
-    my $size = -s "$PAUSE::Config->{INCOMING_LOC}/$_";
-    my $upldby = "";
-    $sth->execute($_);
-    if ($sth->rows > 0) {
-      my(@users);
-      while (my($userid,$uri,$dgot) = $mgr->fetchrow($sth, "fetchrow_array")) {
-        push @users, $userid if $userid && $dgot && $dgot>$now-86400*3;
-      }
-      $upldby = sprintf "; %s", join(", ", @users) if @users;
-    }
-    $incom{$_} = sprintf " <tt>%s <small>[%db%s]</small></tt>\n", $_, $size, $upldby;
-  }
-  $dh->close;
-  if (@incom) {
-    push @m, ($mgr->radio_group(
-				name =>"pause99_add_uri_upload",
-				values => [sort @incom],
-				labels => \%incom,
-				linebreak => 'true',
-				default => '/',
-			       ));
-  } else {
-    push @m, ("\nNo files found in incoming directory\n");
-  }
-
-  push @m, "<br />";
-
-  push @m, qq{<input type="submit" name="SUBMIT_pause99_add_uri_upload"
- value="Upload the checked file" /></td></tr>\n};
 
   # END OF UPLOAD OPTIONS
 
@@ -1796,13 +1731,12 @@ into $her directory. The request used the following parameters:});
 
 sub add_uri_continue_with_uri {
   my($self,$mgr,$uri,$success,$didit) = @_;
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my $u = $self->active_user_record($mgr);
   my $userhome = PAUSE::user2dir($u->{userid});
   my $dbh = $mgr->connect;
   my $now = time;
-  my $r = $mgr->{R};
-  my $server = $r->server->server_hostname;
+  my $server = $PAUSE::Config->{SERVER_NAME}; # XXX: $r->server->server_hostname
   my @m;
     push @m, "\n\n<blockquote class='actionresponse'>\n",
      "<!-- start of response to user's action -->\n\n",
@@ -1813,7 +1747,7 @@ sub add_uri_continue_with_uri {
 
 
     if ($@) {
-      die Apache::HeavyCGI::Exception
+      die PAUSE::HeavyCGI::Exception
 	  ->new(ERROR => [qq{
 Sorry, <b>$uri</b> could not be recognized as an uri (},
 			  $@,
@@ -1829,7 +1763,7 @@ href="mailto:},
 
       if ($filename eq "CHECKSUMS") {
         # userid DERHAAG demonstrated that it could be uploaded on 2002-04-26
-        die Apache::HeavyCGI::Exception
+        die PAUSE::HeavyCGI::Exception
             ->new(ERROR => "Files with the name CHECKSUMS cannot be
                             uploaded to CPAN, they are reserved for
                             CPAN's internals.");
@@ -1852,48 +1786,47 @@ href="mailto:},
         $subdir =~ s|/$||;
         $subdir =~ s|/+|/|g;
       }
+      my $is_perl6 = 0;
       if (defined $subdir && length $subdir) {
+        $is_perl6 = 1 if $subdir =~ /^Perl6\b/;
         $uriid = "$userhome/$subdir/$filename";
       }
 
       if ( length $uriid > 255 ) {
-        die Apache::HeavyCGI::Exception
+        die PAUSE::HeavyCGI::Exception
             ->new(ERROR => "Path name too long: $uriid is longer than
                 255 characters.");
       }
 
     ALLOW_OVERWRITE: if (
-	  $filename =~ /(readme|\.html|\.txt|\.[xy]ml|\.[pr]df|\.pod)(\.gz|\.bz2)?$/i
+	  $filename =~ /(readme|\.html|\.txt|\.[xy]ml|\.json|\.[pr]df|\.pod)(\.gz|\.bz2)?$/i
           ||
           $uriid =~ m!^C/CN/CNANDOR/(?:mp_(?:app|debug|doc|lib|source|tool)|VISEICat(?:\.idx)?|VISEData)!
 	 ) {
 	# Overwriting allowed
-	my $dele_query = "DELETE FROM uris WHERE uriid = '$uriid'";
-	$dbh->do($dele_query);
+	$dbh->do("DELETE FROM uris WHERE uriid = ?", undef, $uriid);
       }
-      my $mail_announce = $req->param("pause99_add_uri_mail_announce")
-	  if $mgr->{UserGroups}{admin} || $mgr->{UserGroups}{pumpking};
-      $mail_announce ||= "";
-      my $query = qq{INSERT INTO uris
+      my $query = q{INSERT INTO uris
                             (uriid,     userid,
                              basename,
-                             uri,    mailto_p5p,
-		             changedby, changed)
-                     VALUES ('$uriid', '$u->{userid}',
-                             '$filename',
-                             '$uri', '$mail_announce',
-                             '$mgr->{User}{userid}', '$now')};
+                             uri,
+		             changedby, changed, is_perl6)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)};
+      my @query_params = (
+	$uriid, $u->{userid}, $filename, $uri, $mgr->{User}{userid}, $now,
+    $is_perl6
+      );
       #display query
-      my $cp = $mgr->escapeHTML($query);
+      my $cp = $mgr->escapeHTML("$query/(@query_params)");
       push @m, qq{<h3>Submitting query</h3>};
       if ($mgr->{UseModuleSet} eq "patchedCGI") {
         warn "patchedCGI not supported anymore";
 	my @debug = "DEBUGGING patched CGI:\n";
 	push @debug, scalar localtime;
-	my %headers_in = $r->headers_in;
-	for my $h (keys %headers_in) {
+	my %headers = %{ $req->headers }; # XXX: or maybe use header_field_names
+	for my $h (keys %headers) {
           next if $h =~ /Authorization/; # security!
-	  push @debug, sprintf " %s: %s\n", $h, $headers_in{$h};
+	  push @debug, sprintf " %s: %s\n", $h, $headers{$h};
 	}
 	for ($req->param) {
 	  push @debug, " $_: ";
@@ -1922,7 +1855,7 @@ href="mailto:},
 	push @m, "Resulting SQL: ", $cp;
       }
       local($dbh->{RaiseError}) = 0;
-      if ($dbh->do($query)) {
+      if ($dbh->do($query, undef, @query_params)) {
 	$$success .= qq{
 
 The request is now entered into the database where the PAUSE daemon
@@ -1950,19 +1883,15 @@ href="http://backpan.cpan.org/authors/id/$userhome/">backpan</a>
 
 });
 
-	my $tmpdir = "ftp://$server/tmp/$userhome";
 	my $usrdir = "https://$server/pub/PAUSE/authors/id/$userhome";
 	my $tailurl = "https://$server/pause/authenquery?ACTION=tail_logfile" .
             "&pause99_tail_logfile_1=5000";
 	my $etailurl = $mgr->escapeHTML($tailurl);
 	push @m, (qq{
 
-<p><b>Debugging:</b> you may want to watch the temporary directory
-where your submission should show up soon: <a
-href="$tmpdir">$tmpdir</a> (be patient, this directory may not exist
-yet). If it passes some simple tests, it will be uploaded to its <a
-href="$usrdir">final destination</a>. If something's wrong, please
-check the logfile of the daemon. See the tail of it with <a
+<p><b>Debugging:</b> your submission should show up soon at <a
+href="$usrdir">$usrdir</a>. If something's wrong, please
+check the logfile of the daemon: see the tail of it with <a
 href="$etailurl">$etailurl</a>. If you already know what's going wrong, you
 may wish to visit the <a href="authenquery?ACTION=edit_uris">repair
 tool</a> for pending uploads.</p>
@@ -1982,7 +1911,7 @@ from the indexer a little later (usually within 1 hour).
 
       } else {
 	my $errmsg = $dbh->errstr;
-        $r->status(406);
+        $mgr->{RES}->status(406);
 	push @m, (qq{
 
 <p><b>Could not enter the URL into the database.
@@ -1990,12 +1919,13 @@ Reason:</b></p><p>$errmsg</p>
 
 });
 	if ($errmsg =~ /non\s+unique\s+key|Duplicate/i) {
+          $mgr->{RES}->status(409);
           my $sth = $dbh->prepare("SELECT * FROM uris WHERE uriid=?");
           $sth->execute($uriid);
           my $rec = $mgr->fetchrow($sth, "fetchrow_hashref");
           for my $k (qw(changed dgot dverified)) {
             if ($rec->{$k}) {
-              $rec->{$k} .= sprintf " [%s GMT]", scalar gmtime $rec->{$k};
+              $rec->{$k} .= sprintf " [%s UTC]", scalar gmtime $rec->{$k};
             }
           }
           my $as_table = $self->hash_as_table($rec);
@@ -2086,8 +2016,7 @@ sub wrappar {
 sub delete_files {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
-  my $req = $mgr->{CGI};
-  my $r = $mgr->{R};
+  my $req = $mgr->{REQ};
   my @m;
   my $u = $self->active_user_record($mgr);
   $mgr->prefer_post(1);
@@ -2110,14 +2039,14 @@ sub delete_files {
   }
 
   # NONO, this is nothing we should die from:
-  #      die Apache::HeavyCGI::Exception
+  #      die PAUSE::HeavyCGI::Exception
   #	  ->new(ERROR => [qq{No files found in authors/id/$userhome}]);
 
 
   my $time = time;
   my $blurb = "";
   # my $myurl = $mgr->myurl;
-  my $server = $r->server->server_hostname;
+  my $server = $PAUSE::Config->{SERVER_NAME}; # XXX: $r->server->server_hostname
   if ($req->param('SUBMIT_pause99_delete_files_delete')) {
 
     foreach my $f ($req->param('pause99_delete_files_FILE')) {
@@ -2133,9 +2062,10 @@ sub delete_files {
 	$blurb .= "WARNING: CHECKSUMS not erasable: $userhome/$f\n";
 	next;
       }
-      my $sql = "INSERT INTO deletes
-                 VALUES ('$userhome/$f', '$time', '$mgr->{User}{userid}')";
-      $dbh->do($sql) or next;
+      $dbh->do(
+	"INSERT INTO deletes VALUES (?, ?, ?)", undef,
+	"$userhome/$f", $time, "$mgr->{User}{userid}"
+      ) or next;
 
       $blurb .= "\$CPAN/authors/id/$userhome/$f\n";
 
@@ -2144,16 +2074,20 @@ sub delete_files {
       my $readme = $f;
       $readme =~ s/(\.tar.gz|\.zip)$/.readme/;
       if ($readme ne $f && -f $readme) {
-	$sql = qq{INSERT INTO deletes
-                  VALUES ('$userhome/$readme','$time','$mgr->{User}{userid}')};
-	$dbh->do($sql) or next;
+	$dbh->do(
+	  q{INSERT INTO deletes VALUES (?,?,?)}, undef,
+	  "$userhome/$readme", $time, $mgr->{User}{userid},
+	) or next;
 	$blurb .= "\$CPAN/authors/id/$userhome/$readme\n";
       }
     }
   } elsif ($req->param('SUBMIT_pause99_delete_files_undelete')) {
     foreach my $f ($req->param('pause99_delete_files_FILE')) {
-      my $sql = "DELETE FROM deletes WHERE deleteid = '$userhome/$f'";
-      $dbh->do($sql) or warn sprintf "FAILED Query: %s: %s", $sql, $DBI::errstr;
+      my $sql = "DELETE FROM deletes WHERE deleteid = ?";
+      $dbh->do(
+	$sql, undef,
+	"$userhome/$f"
+      ) or warn sprintf "FAILED Query: %s/: %s", $sql, "$userhome/$f", $DBI::errstr;
     }
   }
   if ($blurb) {
@@ -2211,9 +2145,9 @@ glory is collected on http://history.perl.org/backpan/});
       $sth = $dbh->prepare(qq{SELECT deleteid, changed
                               FROM deletes
                               WHERE deleteid
-                              LIKE '$userhome/%'})           #}
+                              LIKE ?})           #}
       and
-      $sth->execute
+      $sth->execute("$userhome/%")
       and
       $sth->rows
      ) {
@@ -2258,8 +2192,7 @@ glory is collected on http://history.perl.org/backpan/});
 sub show_files {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
-  my $req = $mgr->{CGI};
-  my $r = $mgr->{R};
+  my $req = $mgr->{REQ};
   my @m;
   my $u = $self->active_user_record($mgr);
   $mgr->prefer_post(1);
@@ -2291,9 +2224,9 @@ sub show_files {
       $sth = $dbh->prepare(qq{SELECT deleteid, changed
                               FROM deletes
                               WHERE deleteid
-                              LIKE '$userhome/%'})
+                              LIKE ?})
       and
-      $sth->execute
+      $sth->execute("$userhome/%")
       and
       $sth->rows
      ) {
@@ -2340,7 +2273,7 @@ sub scheduled {
 
 sub add_user_doit {
   my($self,$mgr,$userid,$fullname,$dont_clear) = @_;
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my $T = time;
   my $dbh = $mgr->connect;
   local($dbh->{RaiseError}) = 0;
@@ -2408,7 +2341,7 @@ Description: };
       my @qbind2 = ($maillistid,    $maillistname,
                     $subscribe,     $changed, $mgr->{User}{userid}, $email);
       unless ($dbh->do($query,undef,@qbind2)) {
-        die Apache::HeavyCGI::Exception
+        die PAUSE::HeavyCGI::Exception
             ->new(ERROR => [qq{<p><b>Query[$query]with qbind2[@qbind2] failed.
  Reason:</b></p><p>$DBI::errstr</p>}]);
       }
@@ -2434,11 +2367,11 @@ Description: };
                        ) VALUES (
                        ?,?,?,?,?,?
                        )};
-        my $pwenc = crypt($onetime,salt());
+        my $pwenc = PAUSE::Crypt::hash_password($onetime);
         my $dbh = $mgr->authen_connect;
         local($dbh->{RaiseError}) = 0;
         my $rc = $dbh->do($sql,undef,$userid,$pwenc,$email,1,time,$mgr->{User}{userid});
-        die Apache::HeavyCGI::Exception
+        die PAUSE::HeavyCGI::Exception
             ->new(ERROR =>
                   [qq{<p><b>Query [$sql] failed. Reason:</b></p><p>$DBI::errstr</p>}.
                    qq{<p>This is very unfortunate as we have no option to rollback.}.
@@ -2512,6 +2445,10 @@ If you need any further information, please visit
   \$CPAN/modules/04pause.html.
 If this doesn't answer your questions, contact modules\@perl.org.
 
+Before uploading your first module, we strongly encourage you to discuss
+your module idea on PrePAN at http://prepan.org/ to get feedback from
+experienced Perl developers.
+
 Thank you for your prospective contributions,
 The Pause Team
 };
@@ -2547,7 +2484,7 @@ Subject: $subject\n};
       warn "Info: clearing all fields";
       for my $field (qw(userid fullname email homepage subscribe memo)) {
         my $param = "pause99_add_user_$field";
-        $req->param($param,"");
+        $req->parameters->set($param,"");
       }
     }
 
@@ -2576,8 +2513,7 @@ sub get_secretemail {
 sub add_user {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
-  my $req = $mgr->{CGI};
-  my $r = $mgr->{R};
+  my $req = $mgr->{REQ};
   my @m;
 
   my $dbh = $mgr->connect;
@@ -2587,7 +2523,7 @@ sub add_user {
     my $session = $mgr->session;
     my $s = $session->{APPLY};
     for my $a (keys %$s) {
-      $req->param("pause99_add_user_$a", $s->{$a});
+      $req->parameters->set("pause99_add_user_$a" => $s->{$a});
       warn "retrieving from session a[$a]s(a)[$s->{$a}]";
     }
   }
@@ -2606,7 +2542,7 @@ sub add_user {
 
     }
 
-    $req->param("pause99_add_user_userid", $userid) if $userid;
+    $req->parameters->set("pause99_add_user_userid", $userid) if $userid;
     my $doit = 0;
     my $dont_clear;
     my $fullname_raw = $req->param('pause99_add_user_fullname');
@@ -2614,7 +2550,7 @@ sub add_user {
     $fullname = $mgr->any2utf8($fullname_raw);
     warn "fullname[$fullname]fullname_raw[$fullname_raw]";
     if ($fullname ne $fullname_raw) {
-      $req->param("pause99_add_user_fullname",$fullname);
+      $req->parameters->set("pause99_add_user_fullname",$fullname);
       my $debug = $req->param("pause99_add_user_fullname");
       warn "debug[$debug]fullname[$fullname]";
     }
@@ -2686,7 +2622,7 @@ sub add_user {
               }
               push @urow, "<td>$duserid</td>";
           } else {
-              push @urow, "<td>&nbsp;</td>";
+              push @urow, "<td>&#160;</td>";
           }
           {
               my($bold,$end_bold) = ("","");
@@ -2701,7 +2637,7 @@ sub add_user {
               if (defined($sfullname)&&length($sfullname)) {
                   push @urow, "<td>$bold$dfullname$end_bold</td>";
               } else {
-                  push @urow, "<td>&nbsp;</td>";
+                  push @urow, "<td>&#160;</td>";
               }
           }
           my $broken_spublic_email = $spublic_email;
@@ -2722,7 +2658,7 @@ sub add_user {
                   ($bold,$end_bold) = ("<b>","</b>");
                   $score++;
               }
-              push @urow, "secret&nbsp;email:&nbsp;<span style='color: $se_color'>$bold$ssecretemail$end_bold</span><br/>";
+              push @urow, "secret&#160;email:&#160;<span style='color: $se_color'>$bold$ssecretemail$end_bold</span><br/>";
           }
           if ($shomepage) {
               my($bold,$end_bold) = ("","");
@@ -2730,19 +2666,19 @@ sub add_user {
                   ($bold,$end_bold) = ("<b>","</b>");
                   $score++;
               }
-              push @urow, "homepage:&nbsp;$bold$shomepage$end_bold<br/>";
+              push @urow, "homepage:&#160;$bold$shomepage$end_bold<br/>";
           }
           if ($sintroduced) {
             my $time = scalar(gmtime($sintroduced));
-            $time =~ s/\s/\&nbsp;/g;
-            push @urow, "introduced&nbsp;on:&nbsp;$time<br/>";
+            $time =~ s/\s/\&#160;/g;
+            push @urow, "introduced&#160;on:&#160;$time<br/>";
           }
           if ($schanged) {
             my $time = scalar(gmtime($schanged));
-            $time =~ s/\s/\&nbsp;/g;
-            push @urow, "changed&nbsp;on:&nbsp;$time&nbsp;by&nbsp;$schangedby<br/>";
+            $time =~ s/\s/\&#160;/g;
+            push @urow, "changed&#160;on:&#160;$time&#160;by&#160;$schangedby<br/>";
           } else {
-            push @urow, "changed&nbsp;by:&nbsp;$schangedby<br/>";
+            push @urow, "changed&#160;by:&#160;$schangedby<br/>";
           }
           push @urow, "</tr>\n";
           my $line = join "", @urow;
@@ -2795,6 +2731,12 @@ sub add_user {
 				       value=>"  Insert with metaphone care  "),
 			  $mgr->submit(name=>"SUBMIT_pause99_add_user_Definitely",
 				       value=>"  Insert most definitely  "));
+
+  my $delete_link = sprintf(
+      qq{<p>If this is a bad request: <a href="authenquery?ACTION=manage_id_requests;subaction=delete;USERID=%s">Delete the ID request</a></p>},
+      $userid,
+  );
+
   push(@m,
        qq{<h3>Add a user or mailinglist</h3>},
        $submit_butts,
@@ -2838,7 +2780,9 @@ sub add_user {
                       rows=>6,
                       cols=>60),
        qq{<br />},
-       $submit_butts
+       $submit_butts,
+       qq{<br />},
+       $delete_link,
       );
 
   @m;
@@ -2849,8 +2793,7 @@ sub usertable {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   my $userid = shift;
-  my $req = $mgr->{CGI};
-  my $r = $mgr->{R};
+  my $req = $mgr->{REQ};
   my $dbh = $mgr->connect;
   my $sql = "SELECT * FROM users WHERE userid=?";
   my $sth = $dbh->prepare($sql);
@@ -2867,7 +2810,7 @@ sub hash_as_table {
   for my $k (sort keys %$rec) {
     push @m, sprintf(qq{<tr><td>%s</td><td>%s</td></tr>\n},
                      $k,
-                     $rec->{$k} || "&nbsp;"
+                     $rec->{$k} || "&#160;"
                     );
   }
   push @m, qq{</table>\n};
@@ -2880,21 +2823,32 @@ sub request_id {
 
   my(@m);
 
-  my $req = $mgr->{CGI};
-  my $r = $mgr->{R};
+  push @m, q{
+    <p>A PAUSE account is only required to distribute and manage Perl module
+    distributions on CPAN. You do not need a PAUSE account to submit
+    bug reports to <a href="http://rt.cpan.org/">RT</a> or participate
+    in many Perl community sites — please register a
+    <a href="http://www.bitcard.org">Bitcard</a> account instead.</p>
+  };
+
+  my $req = $mgr->{REQ};
   $mgr->prefer_post(1);
 
   # first time: form
   # second time with error: error message + form
   # second time without error: OK message
+  # bot debunked? => "Thank you!"
 
   my $showform = 0;
   my $regOK = 0;
 
+  if ($req->param('url')) { # debunked
+    return "Thank you!";
+  }
   my $fullname  = $req->param( 'pause99_request_id_fullname') || "";
   my $ufullname = $mgr->any2utf8($fullname);
   if ($ufullname ne $fullname) {
-    $req->param("pause99_request_id_fullname", $ufullname);
+    $req->parameters->set("pause99_request_id_fullname", $ufullname);
     $fullname = $ufullname;
   }
   my $email     = $req->param( 'pause99_request_id_email') || "";
@@ -2903,21 +2857,25 @@ sub request_id {
   my $rationale = $req->param("pause99_request_id_rationale") || "";
   my $urat = $mgr->any2utf8($rationale);
   if ($urat ne $rationale) {
-    $req->param("pause99_request_id_rationale", $urat);
+    $req->parameters->set("pause99_request_id_rationale", $urat);
     $rationale = $urat;
   }
   warn sprintf(
                "userid[%s]Valid_Userid[%s]args[%s]",
                $userid,
                $Valid_Userid,
-               scalar($r->args)||"",
+               scalar($req->uri->query)||"",
               );
 
   if ( $req->param("SUBMIT_pause99_request_id_sub") ) {
     # check for errors
 
     my @errors = ();
-    unless( $fullname ) {
+    if ( $fullname ) {
+      unless ($fullname =~ /[ ]/) {
+        push @errors, "Name does not look like a full civil name. Please accept our apologies if you believe we're wrong. In this case please write to @{$PAUSE::Config->{ADMINS}}.";
+      }
+    } else {
       push @errors, "You must supply a name\n";
     }
     unless( $email ) {
@@ -2931,6 +2889,12 @@ sub request_id {
       push @errors, "Thank you for giving us a short description of
         what you're planning to contribute, but frankly, this looks a
         bit too short" if length($rationale)<10;
+      push @errors, "Please do not use HTML links in your description of
+        what you're planning to contribute" if $rationale =~ /<\s*a\s+href\s*=/ims;
+
+      my $url_count =()= $rationale =~ m{https?://}gi;
+      push @errors, "Please do not include more than one URL in your description of
+        what you're planning to contribute" if $url_count > 1;
 
     } else {
 
@@ -2940,7 +2904,7 @@ sub request_id {
     }
     if ( $userid ) {
       $userid = uc $userid;
-      $req->param('pause99_request_id_userid', $userid);
+      $req->parameters->set('pause99_request_id_userid', $userid);
       my $db = $mgr->connect;
       my $sth = $db->prepare("SELECT userid FROM users WHERE userid=?");
       $sth->execute($userid);
@@ -2978,45 +2942,63 @@ sub request_id {
     my $alt = 0;
     # push @m, "<table>\n";
     foreach my $arr (
-                     [
-                      'Full name',
-                      'pause99_request_id_fullname',
-                      "Unicode Characters OK"
-                     ],
-                     [
-                      'Email',
-                      'pause99_request_id_email',
-                      'required, otherwise we cannot send you the password'
-                     ],
-                     [
-                      'Web site',
-                      'pause99_request_id_homepage',
-                      'optional'
-                     ],
-                     [
-                      'Desired ID',
-                      'pause99_request_id_userid',
+                     {
+                      topic => 'Your full name (civil name)',
+                      fname => 'pause99_request_id_fullname',
 
-                      "3-9 characters matching [A-Z], please",
+                      fcomment => "Unicode Characters OK.",
+                      footnote => "Note: PAUSE has been developed in a
+      time when it was more common than today that people have names
+      consisting of at least a first name and a second name, like
+      <i>Ben Cartwright</i> or <i>Tony Nelson</i>, you get the idea.
+      This field is considered to be filled with both names, separated
+      by a space. This trivial expectation was then coded into the
+      server side sanity check of this form and it turned out to be a
+      super efficient spam protection because bots often did not try
+      to enter a space in the middle of the field. It was about the
+      year 2003 when people started to complain that they had tried
+      <i>Peter</i> and it did not work. Poor Peter, please remember
+      you <b>do</b> have a second name.",
 
-                     ],
+                     },
+                     {
+                      topic => 'Email',
+                      fname => 'pause99_request_id_email',
+                      fcomment => 'required, otherwise we cannot send you the password',
+                     },
+                     {
+                      topic => 'Web site',
+                      fname => 'pause99_request_id_homepage',
+                      fcomment => 'optional'
+                     },
+                     {
+                      topic => 'Desired ID',
+                      fname => 'pause99_request_id_userid',
+                      fcomment => "3-9 characters matching [A-Z], please",
+
+                     },
                     ) {
       $alt ^= 1;
       my $altname = $alt ? "alternate1" : "alternate2";
-      push @m, qq{<div class="$altname"><p><b>$arr->[0]</b></p><p>};
-      if (my $note = $arr->[2]) {
+      push @m, qq{<div class="$altname"><p><b>$arr->{topic}</b></p><p>};
+      if (my $note = $arr->{fcomment}) {
         push @m, qq{<small>$note</small></p><p>};
       }
-      push @m, $mgr->textfield( name => $arr->[1], size => 32 );
+      push @m, $mgr->textfield( name => $arr->{fname}, size => 32 );
+      if (my $note = $arr->{footnote}) {
+        push @m, qq{</p><div style='font-size:0.75em'>$note</div><p>};
+      }
       push @m, "</p></div>";
     }
 
     push @m, qq{<p><b>A short description of why you would like a
-          PAUSE ID:</b></p><p><small>required.</small></p><p>};
+          PAUSE ID:</b></p><p><small>required; include what you are planning to contribute; do not use HTML</small></p><p>};
 
     push @m, $mgr->textarea(name=>"pause99_request_id_rationale",
                             rows=>8,
                             cols=>60);
+    push @m, q{<!-- zdjela meda -->
+  <div style="visibility:hidden;">If you're a bot, then type something in here: <input name="url" size="1"/></div>};
     push @m, qq{</p>};
     # push @m, "</table>\n";
 
@@ -3104,9 +3086,9 @@ $blurbcopy
 </pre>
 <hr noshade="noshade" />
 }; #};
-    my $header = {
-                  Subject => $subject
-                 };
+    $header = {
+               Subject => $subject
+              };
     warn "To[@to]Subject[$header->{Subject}]";
     $mgr->send_mail_multi(\@to,$header,$blurb);
   }
@@ -3118,7 +3100,7 @@ sub mailpw {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   my(@m,$param,$email);
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
 
   # TUT: We reach this point in the code only if the Querystring
   # specified ACTION=mailpw or something equivalent. The parameter ABRA
@@ -3137,10 +3119,10 @@ sub mailpw {
     $param = uc($param);
     unless ($param =~ /^[A-Z\-]+$/) {
       if ($param =~ /@/) {
-        die Apache::HeavyCGI::Exception->new(ERROR =>
+        die PAUSE::HeavyCGI::Exception->new(ERROR =>
                                              qq{Please supply a userid, not an email address.});
       }
-      die Apache::HeavyCGI::Exception->new(ERROR =>
+      die PAUSE::HeavyCGI::Exception->new(ERROR =>
                                            sprintf qq{A userid of <i>%s</i>
  is not allowed, please retry with a valid userid. Nothing done.}, $mgr->escapeHTML($param));
     }
@@ -3162,7 +3144,7 @@ sub mailpw {
         $u = $self->active_user_record($mgr,$param);
       };
       if ($@) {
-        die Apache::HeavyCGI::Exception->new(ERROR =>
+        die PAUSE::HeavyCGI::Exception->new(ERROR =>
                                              qq{Cannot find a userid
                                              of <i>$param</i>, please
                                              retry with a valid
@@ -3175,13 +3157,13 @@ sub mailpw {
                                  VALUES (?,   ?,          1,          ?)};
 
         $authen_dbh->do($sql,{},$u->{userid},$u->{email},time)
-            or die Apache::HeavyCGI::Exception->new(ERROR =>
+            or die PAUSE::HeavyCGI::Exception->new(ERROR =>
                                                     qq{The userid of <i>$param</i>
  is too old for this interface. Please get in touch with administration.});
 
         $rec->{secretemail} = $u->{email};
       } else {
-        die Apache::HeavyCGI::Exception->new(ERROR =>
+        die PAUSE::HeavyCGI::Exception->new(ERROR =>
                                              qq{A userid of <i>$param</i>
  is not known, please retry with a valid userid.});
       }
@@ -3220,7 +3202,7 @@ sub mailpw {
         } else {
           $duration = sprintf "%d seconds", $PAUSE::Config->{ABRA_EXPIRATION};
         }
-	die Apache::HeavyCGI::Exception->new
+	die PAUSE::HeavyCGI::Exception->new
             (
              ERROR => sprintf(
                               qq{A token for <i>$param</i> that allows
@@ -3231,7 +3213,7 @@ sub mailpw {
                              ),
             );
       } else {
-	die Apache::HeavyCGI::Exception->new(ERROR => $authen_dbh->errstr);
+	die PAUSE::HeavyCGI::Exception->new(ERROR => $authen_dbh->errstr);
       }
 
       # TUT: a bit complicated only because we switched back and forth
@@ -3345,7 +3327,7 @@ Excerpt from a mail:<pre>
 </pre>
 };
 
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my $selectedid = "";
   my $selectedrec = {};
   my $u = $self->active_user_record($mgr);
@@ -3355,7 +3337,7 @@ Excerpt from a mail:<pre>
     $selectedid = $param;
   } elsif ($param = $req->param("HIDDENNAME")) {
     $selectedid = $param;
-    $req->param("pause99_edit_ml_3",$param);
+    $req->parameters->set("pause99_edit_ml_3",$param);
   }
   warn sprintf(
 	       "selectedid[%s]IsMR[%s]",
@@ -3478,7 +3460,7 @@ Excerpt from a mail:<pre>
       my $fieldtype = $meta{$field}{type};
       my $fieldname = "pause99_edit_ml_$field";
       if ($force_sel){
-	$req->param($fieldname, $selectedrec->{$field}||"");
+	$req->parameters->set($fieldname, $selectedrec->{$field}||"");
       } elsif ($update_sel) {
 	my $param = $req->param($fieldname);
 	if ($param ne $selectedrec->{$field}) {
@@ -3541,7 +3523,7 @@ sub edit_mod {
   my $mgr = shift;
   $mgr->prefer_post(0);
   my(@m);
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my $selectedid = "";
   my $selectedrec = {};
   my $u = $self->active_user_record($mgr);
@@ -3666,7 +3648,7 @@ sub edit_mod {
 sub _edit_mod_selected {
   my($self,$mgr,$to,$selectedrec,$u,$is_only_one) = @_;
   my @m;
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my @to = @$to;
   my $dbh = $mgr->connect;
   push @m, qq{<h3>Record for $selectedrec->{modid}</h3><p>More
@@ -3779,12 +3761,12 @@ mlstatus
             $selectedrec->{$field} !~ /^\d*$/;
       }
       if ($force_sel) {
-	$req->param($fieldname, $selectedrec->{$field}||"");
+	$req->parameters->set($fieldname, $selectedrec->{$field}||"");
       } elsif ($update_sel) {
 	my $param = $req->param($fieldname);
         my $uparam = $mgr->any2utf8($param);
         if ($uparam ne $param) {
-          $req->param($fieldname,$uparam);
+          $req->parameters->set($fieldname,$uparam);
           $param = $uparam;
         }
 	if ($param ne $selectedrec->{$field}) {
@@ -3793,11 +3775,11 @@ mlstatus
             my $ucparam = uc $param;
             unless ($ucparam eq $param) {
               $param = $ucparam;
-              $req->param($fieldname, $param);
+              $req->parameters->set($fieldname, $param);
             }
             my $nu = $self->active_user_record($mgr, $param, {checkonly => 1});
 
-            die Apache::HeavyCGI::Exception
+            die PAUSE::HeavyCGI::Exception
                 ->new(ERROR => sprintf("Unknown user[%s]",
                                        $param,
                                       )) unless
@@ -3869,7 +3851,7 @@ mlstatus
 	}
       } elsif ($is_only_one) {
         # as if they had selected it already
-	$req->param($fieldname, $selectedrec->{$field}||"");
+	$req->parameters->set($fieldname, $selectedrec->{$field}||"");
       }
       push @m_modrec, $mgr->$fieldtype(
 				       'name' => $fieldname,
@@ -3910,7 +3892,7 @@ sub edit_uris {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   my(@m);
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my $selectedid = "";
   my $selectedrec = {};
   if (my $param = $req->param("pause99_edit_uris_3")) { # upper selectbox
@@ -4057,7 +4039,7 @@ changedby
       my $fieldtype = $meta{$field}{type};
       my $fieldname = "pause99_edit_uris_$field";
       if ($force_sel) {
-	$req->param($fieldname, $selectedrec->{$field}||"");
+	$req->parameters->set($fieldname, $selectedrec->{$field}||"");
       } elsif ($update_sel && $fieldtype) {
 	my $param = $req->param($fieldname);
 	if ($param ne $selectedrec->{$field}) {
@@ -4166,8 +4148,7 @@ sub add_mod {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   my(@m);
-  my $req = $mgr->{CGI};
-  my $r = $mgr->{R};
+  my $req = $mgr->{REQ};
 
   my $dbh = $mgr->connect;
   local($dbh->{RaiseError}) = 0;
@@ -4195,7 +4176,7 @@ sub add_mod {
     my $session = $mgr->session;
     my $s = $session->{APPLY};
     for my $a (keys %$s) {
-      $req->param("pause99_add_mod_$a", $s->{$a});
+      $req->parameters->set("pause99_add_mod_$a", $s->{$a});
       warn "retrieving from session a[$a]s(a)[$s->{$a}]";
     }
   }
@@ -4220,7 +4201,7 @@ sub add_mod {
     unless (length($modid)) {
       push @errors, qq{The module name is missing.};
     }
-    # $req->param("pause99_add_mod_modid", $modid) if $modid;
+    # $req->parameters->set("pause99_add_mod_modid", $modid) if $modid;
 
     my($chapterid) = $req->param('pause99_add_mod_chapterid');
     warn "chapterid[$chapterid]";
@@ -4233,31 +4214,31 @@ sub add_mod {
     warn "chapterid[$chapterid]";
 
     my($statd) = $req->param('pause99_add_mod_statd');
-    $req->param('pause99_add_mod_statd',$statd='?') unless $statd;
+    $req->parameters->set('pause99_add_mod_statd',$statd='?') unless $statd;
     unless ($meta{statd}{args}{labels}{$statd}) {
       push @errors, qq{The D status of the DSLIP [$statd] is not known.};
     }
 
     my($stats) = $req->param('pause99_add_mod_stats');
-    $req->param('pause99_add_mod_stats',$stats='?') unless $stats;
+    $req->parameters->set('pause99_add_mod_stats',$stats='?') unless $stats;
     unless ($meta{stats}{args}{labels}{$stats}) {
       push @errors, qq{The S status of the DSLIP [$stats] is not known.};
     }
 
     my($statl) = $req->param('pause99_add_mod_statl');
-    $req->param('pause99_add_mod_statl',$statl='?') unless $statl;
+    $req->parameters->set('pause99_add_mod_statl',$statl='?') unless $statl;
     unless ($meta{statl}{args}{labels}{$statl}) {
       push @errors, qq{The L status of the DSLIP [$statl] is not known.};
     }
 
     my($stati) = $req->param('pause99_add_mod_stati');
-    $req->param('pause99_add_mod_stati',$stati='?') unless $stati;
+    $req->parameters->set('pause99_add_mod_stati',$stati='?') unless $stati;
     unless ($meta{stati}{args}{labels}{$stati}) {
       push @errors, qq{The I status of the DSLIP [$stati] is not known.};
     }
 
     my($statp) = $req->param('pause99_add_mod_statp');
-    $req->param('pause99_add_mod_statp',$statp='?') unless $statp;
+    $req->parameters->set('pause99_add_mod_statp',$statp='?') unless $statp;
     unless ($meta{statp}{args}{labels}{$statp}) {
       # XXX for the first few weeks we allow statp to be empty
       # push @errors, qq{The P status of the DSLIP [$statp] is not known.};
@@ -4267,7 +4248,7 @@ sub add_mod {
     my($description) = $req->param('pause99_add_mod_description')||"";
     my $ud = $mgr->any2utf8($description);
     if ($ud ne $description) {
-      $req->param('pause99_add_mod_description',$ud);
+      $req->parameters->set('pause99_add_mod_description',$ud);
       $description = $ud;
     }
     $description =~ s/^\s+//;
@@ -4278,7 +4259,7 @@ sub add_mod {
     } elsif (not length($description)) {
       push @errors, qq{The description is missing.};
     }
-    $req->param("pause99_add_mod_description", $description) if $description;
+    $req->parameters->set("pause99_add_mod_description", $description) if $description;
 
     my($userid) = $req->param('pause99_add_mod_userid');
     unless ($meta{userid}{args}{labels}{$userid}) {
@@ -4373,7 +4354,7 @@ sub add_mod {
       warn "ALERT: could not find chaptertitle";
     }
 
-    my $gmtime = gmtime($time) . " GMT";
+    my $gmtime = gmtime($time) . " UTC";
 
     # as string
     # 	sprintf "%-$Modlist::GLOBAL->{WIDTH_COL1WRITE}s%s%s%s%s %-45s%-${filler}s %s", @{$self}[2..9]; # 15/16
@@ -4388,7 +4369,7 @@ sub add_mod {
     my $ml_entry = sprintf(("%s%-".$modwidth."s %s%s%s%s%s %-44s %s\n"),
         $mdirname, $mbasename, $statd, $stats, $statl, $stati, $statp,
             $description, $userid);
-    my $server = $r->server->server_hostname;
+    my $server = $PAUSE::Config->{SERVER_NAME}; # XXX: $r->server->server_hostname
 
     my $comment = $req->param("pause99_add_mod_comment") || "";
     if ($comment) {
@@ -4493,11 +4474,11 @@ $blurbcopy
       # triggered later on. I would believe.
       if ($req->param($param)){
         if ($param =~ /_chapterid$/) {
-          $req->param($param,"");
+          $req->parameters->set($param,"");
         } elsif ($param =~ /_stat.$/) {
-          $req->param($param,"?");
+          $req->parameters->set($param,"?");
         } else {
-          $req->param($param,"");
+          $req->parameters->set($param,"");
         }
       }
     }
@@ -4561,7 +4542,7 @@ $blurbcopy
 sub _add_mod_hint {
     my($self, $mgr, $wanted, $dbh, $hints) = @_;
     my($dsli,@desc);
-    my $req = $mgr->{CGI};
+    my $req = $mgr->{REQ};
     ($wanted->{modid},$dsli,@desc) = split /\s+/, $req->param("pause99_add_mod_modid");
 
     my $userid = pop @desc;
@@ -4616,27 +4597,27 @@ sub _add_mod_hint {
     } else {
       $sth = $dbh->prepare(qq{SELECT chapterid
                               FROM   mods
-                              WHERE  modid LIKE '$root\::%'});
+                              WHERE  modid LIKE ?});
 
-      $sth->execute;
+      $sth->execute("$root\::%");
       $chapterid = $mgr->fetchrow($sth, "fetchrow_array");
     }
 
     warn "chapterid[$chapterid]";
-    $req->param("pause99_add_mod_modid",$wanted->{modid});
+    $req->parameters->set("pause99_add_mod_modid",$wanted->{modid});
     my(@dsli) = $dsli =~ /(.?)(.?)(.?)(.?)(.?)/;
-    $req->param("pause99_add_mod_statd",$dsli[0]||"?");
-    $req->param("pause99_add_mod_stats",$dsli[1]||"?");
-    $req->param("pause99_add_mod_statl",$dsli[2]||"?");
-    $req->param("pause99_add_mod_stati",$dsli[3]||"?");
-    $req->param("pause99_add_mod_statp",$dsli[4]||"?");
+    $req->parameters->set("pause99_add_mod_statd",$dsli[0]||"?");
+    $req->parameters->set("pause99_add_mod_stats",$dsli[1]||"?");
+    $req->parameters->set("pause99_add_mod_statl",$dsli[2]||"?");
+    $req->parameters->set("pause99_add_mod_stati",$dsli[3]||"?");
+    $req->parameters->set("pause99_add_mod_statp",$dsli[4]||"?");
     my $description = join " ", @desc;
     $description ||= "";
-    $req->param("pause99_add_mod_description",$description);
+    $req->parameters->set("pause99_add_mod_description",$description);
     $chapterid ||= "";
     warn "chapterid[$chapterid]";
-    $req->param("pause99_add_mod_chapterid",$chapterid);
-    $req->param("pause99_add_mod_userid",$userid);
+    $req->parameters->set("pause99_add_mod_chapterid",$chapterid);
+    $req->parameters->set("pause99_add_mod_userid",$userid);
 }
 
 sub apply_mod {
@@ -4644,9 +4625,8 @@ sub apply_mod {
   my $mgr = shift;
   $mgr->prefer_post(1);
   my(@m);
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   $mgr->{CAN_GZIP} = 0; # for debugging
-  my $r = $mgr->{R};
   my $u = $self->active_user_record($mgr);
   push @m, qq{<input type="hidden" name="HIDDENNAME" value="$u->{userid}" />};
   if ($mgr->{User}{userid} ne $u->{userid}) {
@@ -4783,8 +4763,8 @@ sub apply_mod {
       warn "root[$root]";
       $sth = $dbh->prepare("SELECT chapterid
                             FROM   mods
-                            WHERE  modid = '$root' OR modid LIKE '$root\::%'");
-      $sth->execute;
+                            WHERE  modid = ? OR modid LIKE ?");
+      $sth->execute($root, "$root\::%");
       my(%appr);
       if ($sth->rows) {
         while (my $chid = $mgr->fetchrow($sth, "fetchrow_array")) {
@@ -4829,31 +4809,31 @@ sub apply_mod {
     }
 
     my($statd) = $req->param('pause99_apply_mod_statd');
-    $req->param('pause99_apply_mod_statd',$statd='?') unless $statd;
+    $req->parameters->set('pause99_apply_mod_statd',$statd='?') unless $statd;
     if ($statd eq '?') {
       push @errors, qq{The D status of the DSLIP [$statd] is not known.};
     }
 
     my($stats) = $req->param('pause99_apply_mod_stats');
-    $req->param('pause99_apply_mod_stats',$stats='?') unless $stats;
+    $req->parameters->set('pause99_apply_mod_stats',$stats='?') unless $stats;
     if ($stats eq '?') {
       push @errors, qq{The S status of the DSLIP [$stats] is not known.};
     }
 
     my($statl) = $req->param('pause99_apply_mod_statl');
-    $req->param('pause99_apply_mod_statl',$statl='?') unless $statl;
+    $req->parameters->set('pause99_apply_mod_statl',$statl='?') unless $statl;
     if ($statl eq "?") {
       push @errors, qq{The L status of the DSLIP [$statl] is not known.};
     }
 
     my($stati) = $req->param('pause99_apply_mod_stati');
-    $req->param('pause99_apply_mod_stati',$stati='?') unless $stati;
+    $req->parameters->set('pause99_apply_mod_stati',$stati='?') unless $stati;
     if ($stati eq "?") {
       push @errors, qq{The I status of the DSLIP [$stati] is not known.};
     }
 
     my($statp) = $req->param('pause99_apply_mod_statp');
-    $req->param('pause99_apply_mod_statp',$statp='?') unless $statp;
+    $req->parameters->set('pause99_apply_mod_statp',$statp='?') unless $statp;
     if ($statp eq "?") {
       push @errors, qq{The P status of the DSLIP [$statp] is not known.};
     }
@@ -4862,7 +4842,7 @@ sub apply_mod {
     my($description) = $req->param('pause99_apply_mod_description')||"";
     my $ud = $mgr->any2utf8($description);
     if ($ud ne $description) {
-      $req->param('pause99_apply_mod_description',$ud);
+      $req->parameters->set('pause99_apply_mod_description',$ud);
       $description = $ud;
     }
     $description =~ s/^\s+//;
@@ -4873,7 +4853,7 @@ sub apply_mod {
     } elsif (not length($description)) {
       push @errors, qq{The description is missing.};
     }
-    $req->param("pause99_apply_mod_description", $description) if $description;
+    $req->parameters->set("pause99_apply_mod_description", $description) if $description;
 
     goto FORMULAR2 if @errors;
 
@@ -4911,7 +4891,7 @@ sub apply_mod {
       warn "ALERT: could not find chaptertitle";
     }
 
-    my $gmtime = gmtime($time) . " GMT";
+    my $gmtime = gmtime($time) . " UTC";
 
     my($mdirname,$mbasename) = $modid =~ /^(.+::)([^:]+)$/;
     $mdirname ||= "";
@@ -4921,7 +4901,7 @@ sub apply_mod {
     my $ml_entry = sprintf(("%s%-".$modwidth."s %s%s%s%s%s %-44s %s\n"),
         $mdirname, $mbasename, $statd, $stats, $statl, $stati, $statp,
             $description, $applying_userid);
-    my $server = $r->server->server_hostname;
+    my $server = $PAUSE::Config->{SERVER_NAME}; # XXX: $r->server->server_hostname
 
     my $rationale = $req->param("pause99_apply_mod_rationale") || "";
     if ($rationale) {
@@ -5064,9 +5044,9 @@ $blurbcopy
       # triggered later on. I would believe.
       if ($req->param($param)){
         if ($param =~ /chapterid/) {
-          $req->param($param,"");
+          $req->parameters->set($param,"");
         } else {
-          $req->param($param,"");
+          $req->parameters->set($param,"");
         }
       }
     }
@@ -5137,7 +5117,7 @@ sub stat_meta {
   for my $hash (\%statd,\%stats,\%statl,\%stati,\%statp) {
     for my $k (keys %$hash) {
       $hash->{$k} = $deftype =~ /radio/ ?
-          qq{<font color="green"><b>$k</b></font>&nbsp;($hash->{$k}) } :
+          qq{<font color="green"><b>$k</b></font>&#160;($hash->{$k}) } :
               qq{$k -- $hash->{$k}};
     }
   }
@@ -5463,7 +5443,7 @@ sub user_meta {
 sub check_xhtml {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my @m;
   my $dir = "/var/run/httpd/deadmeat";
   if (my $file = $req->param("pause99_check_xhtml_look")) {
@@ -5578,7 +5558,7 @@ sub WAIT::Filter::pause99_edit_users_utflc_20010505 {
 sub who_pumpkin {
   my $self = shift;
   my $mgr = shift;
-  my $cgi = $mgr->{CGI};
+  my $req = $mgr->{REQ};
 
   my @m;
 
@@ -5598,18 +5578,17 @@ sub who_pumpkin {
     }
     $sth->finish;
   };
-  my $output_format = $cgi->param("OF");
+  my $output_format = $req->param("OF");
   if ($output_format){
     if ($output_format eq "YAML") {
       require YAML::Syck;
       local $YAML::Syck::ImplicitUnicode = 1;
       my $dump = YAML::Syck::Dump(\@hres);
       my $edump = Encode::encode_utf8($dump);
-      my $r = $mgr->{R};
-      $r->content_type("text/plain; charset=utf8");
-      $r->send_http_header;
-      $r->print($edump);
-      return $mgr->{DONE} = Apache::Constants::DONE;
+      my $res = $mgr->{RES};
+      $res->content_type("text/plain; charset=utf8");
+      $res->body($edump);
+      return $mgr->{DONE} = HTTP_OK;
     } else {
       die "not supported OF=$output_format"
     }
@@ -5624,10 +5603,58 @@ sub who_pumpkin {
   }
 }
 
+sub who_admin {
+  my $self = shift;
+  my $mgr = shift;
+  my $req = $mgr->{REQ};
+
+  my @m;
+
+  push @m, qq{<p>Query the <code>grouptable</code> table for who is an
+          admin bit holder</p>
+
+          <p>Registered admins:
+};
+
+  my @hres;
+  {
+    my $db = $mgr->authen_connect;
+    my $sth = $db->prepare("SELECT user FROM grouptable WHERE ugroup='admin' order by user");
+    $sth->execute;
+    while (my @row = $sth->fetchrow_array) {
+      push @hres, $row[0];
+    }
+    $sth->finish;
+  };
+  my $output_format = $req->param("OF");
+  if ($output_format){
+    if ($output_format eq "YAML") {
+      require YAML::Syck;
+      local $YAML::Syck::ImplicitUnicode = 1;
+      my $dump = YAML::Syck::Dump(\@hres);
+      my $edump = Encode::encode_utf8($dump);
+      my $res = $mgr->{RES};
+      $res->content_type("text/plain; charset=utf8");
+      $res->body($edump);
+      return $mgr->{DONE} = HTTP_OK;
+    } else {
+      die "not supported OF=$output_format"
+    }
+  } else {
+    push @m, join ", ", @hres;
+    push @m, "</p>";
+    my $href = sprintf("query?ACTION=who_admin;OF=YAML");
+    push @m, qq{<p><a href="$href" style="text-decoration: none;">
+<span class="orange_button">YAML</span>
+</a></p>};
+    return join "", @m;
+  }
+}
+
 sub email_for_admin {
   my $self = shift;
   my $mgr = shift;
-  my $cgi = $mgr->{CGI};
+  my $req = $mgr->{REQ};
 
   my @m;
   my %ALL;
@@ -5672,25 +5699,25 @@ sub email_for_admin {
     $sth2->finish;
     $sth3->finish;
   };
-  my $output_format = $cgi->param("OF");
+  my $output_format = $req->param("OF");
   if ($output_format){
     if ($output_format eq "YAML") {
       require YAML::Syck;
       local $YAML::Syck::ImplicitUnicode = 1;
       my $dump = YAML::Syck::Dump(\%ALL);
       my $edump = Encode::encode_utf8($dump);
-      my $r = $mgr->{R};
-      $r->content_type("text/plain; charset=utf8");
-      $r->send_http_header;
-      $r->print($edump);
-      return $mgr->{DONE} = Apache::Constants::DONE;
+      my $res = $mgr->{RES};
+      $res->content_type("text/plain; charset=utf8");
+      $res->body($edump);
+      return $mgr->{DONE} = HTTP_OK;
     } else {
       die "not supported OF=$output_format"
     }
   } else {
     for my $id (sort keys %ALL) {
       my($mail) = $ALL{$id};
-      push @m, "<tr><td>$id</td><td>$mail</td></tr>\n";
+      my $esc_mail = $mgr->escapeHTML($mail);
+      push @m, "<tr><td>$id</td><td>$esc_mail</td></tr>\n";
     }
     push @m, "</table>";
     my $href = sprintf("authenquery?ACTION=email_for_admin;OF=YAML");
@@ -5704,7 +5731,7 @@ sub email_for_admin {
 sub peek_perms {
   my $self = shift;
   my $mgr = shift;
-  my $cgi = $mgr->{CGI};
+  my $req = $mgr->{REQ};
 
   my @m;
 
@@ -5714,17 +5741,16 @@ sub peek_perms {
             user ID is registered for or all user IDs registered for a
             module, as appropriate.</p>
 
-            <p>Registration comes in one of
-            three types: type <b>modulelist</b> is the registration in
-            the module list (as "blessed" by the module list
-            maintainers; often months behind). Type <b>first-come</b>
-            is the automatic registration on a first-come-first-serve
-            basis that happens on the initial upload. And type
-            <b>co-maint</b> is the registration as co-maintainer which
-            means that the primary maintainer of the namespace has
-            granted permission to upload this module to other
-            userid(s). Per namespace there can only be one primary
-            maintainer (userid in the <b>modulelist</b> or the
+            <p>Registration comes in one of three types: type
+            <b>modulelist</b> is the registration in the old module
+            list (like first-come with metadata). Type
+            <b>first-come</b> is the automatic registration on a
+            first-come-first-serve basis that happens on the initial
+            upload. And type <b>co-maint</b> is the registration as
+            co-maintainer which means that the primary maintainer of
+            the namespace has granted permission to upload this module
+            to other userid(s). Per namespace there can only be one
+            primary maintainer (userid in the <b>modulelist</b> or the
             <b>first-come</b> category) and any number of userids in
             the <b>co-maint</b> category. Being registered in any of
             the categories means that a user is able not only to
@@ -5739,11 +5765,11 @@ sub peek_perms {
             can be corrected.--Thank you!</p><p>};
 
 
-  unless ($cgi->param("pause99_peek_perms_query")) {
-    $cgi->param("pause99_peek_perms_query", $mgr->{User}{userid});
+  unless ($req->param("pause99_peek_perms_query")) {
+    $req->parameters->set("pause99_peek_perms_query", $mgr->{User}{userid});
   }
-  unless ($cgi->param("pause99_peek_perms_by")) {
-    $cgi->param("pause99_peek_perms_by","a");
+  unless ($req->param("pause99_peek_perms_by")) {
+    $req->parameters->set("pause99_peek_perms_by","a");
   }
 
   push @m, $mgr->scrolling_list('name' => 'pause99_peek_perms_by',
@@ -5762,26 +5788,21 @@ sub peek_perms {
   push @m, qq{<input type="submit" name="pause99_peek_perms_sub" value="Submit" />
               </p>};
 
-  if (my $qterm = $cgi->param("pause99_peek_perms_query")) {
-    my $by = $cgi->param("pause99_peek_perms_by");
+  if (my $qterm = $req->param("pause99_peek_perms_query")) {
+    my $by = $req->param("pause99_peek_perms_by");
     my @query       = (
-                qq{SELECT mods.modid,
-                          mods.userid,
-                          users.fullname,
-                          "modulelist"
-                   FROM mods LEFT JOIN users ON mods.userid=users.userid
-},
                 qq{SELECT primeur.package,
                           primeur.userid,
-                          users.fullname,
-                          "first-come"
+                          "first-come",
+                          primeur.userid
                    FROM primeur LEFT JOIN users ON primeur.userid=users.userid
 },
                 qq{SELECT perms.package,
                           perms.userid,
-                          users.fullname,
-                          "co-maint"
+                          "co-maint",
+                          primeur.userid
                    FROM perms LEFT JOIN users ON perms.userid=users.userid
+                              LEFT JOIN primeur ON perms.package=primeur.package
 },
                );
 
@@ -5790,10 +5811,6 @@ sub peek_perms {
     my %seen;
     for my $query (@query) {
       my %fields = (
-                    modulelist => {
-                                   package => "mods.modid",
-                                   userid  => "mods.userid",
-                                  },
                     "first-come" => {
                                      package => "primeur.package",
                                      userid  => "primeur.userid",
@@ -5817,7 +5834,7 @@ sub peek_perms {
       } elsif ($by eq "a") {
         $where = qq{WHERE $fmap->{userid}=?};
       } else {
-        die Apache::HeavyCGI::Exception
+        die PAUSE::HeavyCGI::Exception
             ->new(ERROR => "Illegal parameter for pause99_peek_perms_by");
       }
       $query .= $where;
@@ -5837,11 +5854,13 @@ sub peek_perms {
     }
     if (@res) {
       for my $row (@res) {
-        # add the owner on column 4
-        $row->[4] = $self->owner_of_module($mgr,$row->[0]);
+        # add the owner on column 3
+        # will already be set except for co-maint modules where the
+        # owner is in the modlist but not first-come
+        $row->[3] ||= $self->owner_of_module($mgr,$row->[0]);
       }
-      my @column_names = qw(module userid fullname type owner);
-      my $output_format = $cgi->param("OF");
+      my @column_names = qw(module userid type owner);
+      my $output_format = $req->param("OF");
       if ($output_format){
         my @hres;
         for my $row (@res) {
@@ -5852,11 +5871,10 @@ sub peek_perms {
           local $YAML::Syck::ImplicitUnicode = 1;
           my $dump = YAML::Syck::Dump(\@hres);
           my $edump = Encode::encode_utf8($dump);
-          my $r = $mgr->{R};
-          $r->content_type("text/plain; charset=utf8");
-          $r->send_http_header;
-          $r->print($edump);
-          return $mgr->{DONE} = Apache::Constants::DONE;
+          my $res = $mgr->{RES};
+          $res->content_type("text/plain; charset=utf8");
+          $res->body($edump);
+          return $mgr->{DONE} = HTTP_OK;
         } else {
           die "not supported OF=$output_format"
         }
@@ -5873,8 +5891,6 @@ sub peek_perms {
         $a->[2] cmp $b->[2]
             ||
         $a->[3] cmp $b->[3]
-            ||
-        $a->[4] cmp $b->[4]
       } @res) {
           push @m, qq{<tr>};
           # pause99_peek_perms_by=m&pause99_peek_perms_query=PerlIO&pause99_peek_perms_sub=+Submit+
@@ -5884,23 +5900,21 @@ sub peek_perms {
                                <td><a href="authenquery?pause99_peek_perms_by=a&amp;pause99_peek_perms_query=%s&amp;pause99_peek_perms_sub=1">%s</a></td>
                                <td>%s</td>
                                <td>%s</td>
-                               <td>%s</td>
 },
-                           $row->[0],
-                           $row->[0],
-                           $row->[1],
-                           $row->[1],
-                           $row->[2],
-                           $row->[3],
-                           $row->[4],
+                           $mgr->escapeHTML($row->[0]),
+                           $mgr->escapeHTML($row->[0]),
+                           $mgr->escapeHTML($row->[1]),
+                           $mgr->escapeHTML($row->[1]),
+                           $mgr->escapeHTML($row->[2]),
+                           $mgr->escapeHTML($row->[3]),
                            );
           push @m, qq{</tr>};
       }
       my $href = sprintf("authenquery?pause99_peek_perms_by=%s;".
                          "pause99_peek_perms_query=%s;pause99_peek_perms_sub=1;".
                          "OF=YAML",
-                         $cgi->param("pause99_peek_perms_by"),
-                         URI::Escape::uri_escape($cgi->param("pause99_peek_perms_query"),'\W'),
+                         $req->param("pause99_peek_perms_by"),
+                         URI::Escape::uri_escape($req->param("pause99_peek_perms_query"),'\W'),
                         );
       push @m, qq{</table><a href="$href" style="text-decoration: none;">
 <span class="orange_button">YAML</span>
@@ -5923,8 +5937,7 @@ sub owner_of_module {
 sub reindex {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
-  my $req = $mgr->{CGI};
-  my $r = $mgr->{R};
+  my $req = $mgr->{REQ};
   my @m;
   my $u = $self->active_user_record($mgr);
   push @m, qq{<input type="hidden" name="HIDDENNAME" value="$u->{userid}" />};
@@ -5964,7 +5977,7 @@ decision.</li>
   }
 
   my $blurb;
-  my $server = $r->server->server_hostname;
+  my $server = $PAUSE::Config->{SERVER_NAME}; # XXX: $r->server->server_hostname
   if ($req->param('SUBMIT_pause99_reindex_delete')) {
 
     my $sql = "DELETE FROM distmtimes
@@ -5992,7 +6005,7 @@ decision.</li>
   if ($blurb) {
     my $eta;
     {
-      my $ctf = "/home/k/PAUSE/cron/CRONTAB.ROOT"; # crontabfile
+      my $ctf = "$PAUSE::Config->{CRONPATH}/CRONTAB.ROOT"; # crontabfile
       unless (-f $ctf) {
         $ctf = "/tmp/crontab.root";
       }
@@ -6019,7 +6032,7 @@ decision.</li>
             my $fut = $now + $i * 60;
             my $fum = int $fut % 3600 / 60;
             next unless $sc->contains($fum);
-            $eta = gmtime( $fut + $PAUSE::Config->{RUNTIME_MLDISTWATCH} ) . " GMT";
+            $eta = gmtime( $fut + $PAUSE::Config->{RUNTIME_MLDISTWATCH} ) . " UTC";
             last;
           }
         }
@@ -6115,7 +6128,7 @@ sub share_perms {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   my(@m);
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
 
   $mgr->prefer_post(1); # because the querystring can get too long
 
@@ -6139,10 +6152,10 @@ sub share_perms {
   push @m, qq{<input type="hidden" name="HIDDENNAME" value="$u->{userid}" />};
   push @m, qq{<input type="hidden" name="lsw" value="1" />}; # let submit win
 
-  my $scrolling_list_1 = $self->share_perms_scrl_1($mgr,$u->{userid});
-  my $scrolling_list_2 = $self->share_perms_scrl_2($mgr,$u);
-  my $scrolling_list_3 = $self->share_perms_scrl_3($mgr,$u);
-  my $scrolling_list_4 = $self->share_perms_scrl_4($mgr,$u);
+  my $scrolling_list_mod = $self->share_perms_scrl_mod($mgr,$u->{userid});
+  my $scrolling_list_remove_primary = $self->share_perms_scrl_remove_primary($mgr,$u);
+  my $scrolling_list_make_comaintainer = $self->share_perms_scrl_make_comaintainer($mgr,$u);
+  my $scrolling_list_remove_maintainer = $self->share_perms_scrl_remove_maintainer($mgr,$u);
 
   unless ($subaction) {
 
@@ -6191,23 +6204,20 @@ sub share_perms {
       </tr>
 
       <tr>
-        <td valign="top">$scrolling_list_1</td>
+        <td valign="top">$scrolling_list_mod</td>
         <td align="right" valign="top">
-          <input type="submit"
-                 name="pause99_edit_mod_2"
-                 value="Select" />
         </td>
         <td valign="top">
-          By clicking select you enter the <i>Edit Module Metadata</i>
-          page where you can choose a new owner or edit other module
-          status data.
+          <i>Module Metadata</i> has been removed from PAUSE and
+          is no longer editable.  Please contact a PAUSE administrator to
+          choose a new owner.
         </td>
       </tr>
 
       <tr><td colspan="3">2. You are primary maintainer:</td></tr>
 
       <tr>
-        <td rowspan="2">$scrolling_list_2</td>
+        <td rowspan="2">$scrolling_list_remove_primary</td>
         <td align="right" valign="top">
           <input type="submit"
                  name="weaksubmit_pause99_share_perms_movepr"
@@ -6215,8 +6225,8 @@ sub share_perms {
                  />
         </td>
         <td valign="top">
-          2.1 Pass primary maintainership status to somebody else
-          (giving it up at the same time)
+          2.1 Transfer primary maintainership status to somebody else
+          (you become co-maintainer)
         </td>
       </tr>
 
@@ -6228,8 +6238,8 @@ sub share_perms {
                  />
         </td>
         <td valign="top">
-          2.2 Give up primary maintainership status (without
-          transfering it)
+          2.2 Give up primary maintainership status (abandoning it without
+          transfering it to someone else)
         </td>
       </tr>
 
@@ -6241,7 +6251,7 @@ sub share_perms {
       </tr>
 
       <tr>
-        <td rowspan="2">$scrolling_list_3</td>
+        <td rowspan="2">$scrolling_list_make_comaintainer</td>
         <td align="right"
             valign="top">
           <input type="submit"
@@ -6261,13 +6271,13 @@ sub share_perms {
                  value="Select"
                  />
         </td>
-        <td valign="top">3.2 Remove co-maintainer</td>
+        <td valign="top">3.2 Remove a co-maintainer</td>
       </tr>
 
       <tr> <td colspan="3">4. You are co-maintainer</td> </tr>
 
       <tr>
-        <td valign="top">$scrolling_list_4</td>
+        <td valign="top">$scrolling_list_remove_maintainer</td>
         <td align="right"
             valign="top"><input type="submit"
             name="weaksubmit_pause99_share_perms_remome" value="Select"
@@ -6292,12 +6302,13 @@ sub share_perms {
   @m;
 }
 
-sub share_perms_scrl_1 {
+sub share_perms_scrl_mod {
   my($self,$mgr,$userid) = @_;
   my $dbh = $mgr->connect;
   my $sql = qq{SELECT modid
               FROM mods
               WHERE userid=?
+              AND mlstatus='list'
               ORDER BY modid};
   my @bind = $userid;
   my $sth = $dbh->prepare($sql);
@@ -6317,7 +6328,7 @@ sub share_perms_scrl_1 {
                       );
 }
 
-sub share_perms_scrl_2 {
+sub share_perms_scrl_remove_primary {
   my($self,$mgr,$u) = @_;
   my $dbh = $mgr->connect;
 
@@ -6334,7 +6345,7 @@ sub share_perms_scrl_2 {
                       );
 }
 
-sub share_perms_scrl_3 {
+sub share_perms_scrl_make_comaintainer {
   my($self,$mgr,$u) = @_;
   my $dbh = $mgr->connect;
 
@@ -6354,7 +6365,7 @@ sub share_perms_scrl_3 {
                       );
 }
 
-sub share_perms_scrl_4 {
+sub share_perms_scrl_remove_maintainer {
   my($self,$mgr,$u) = @_;
   my $dbh = $mgr->connect;
 
@@ -6362,8 +6373,9 @@ sub share_perms_scrl_4 {
   my @all_mods = sort keys %$all_mods;
   my %labels;
   for my $m (@all_mods) {
-    my $owner = $self->owner_of_module($mgr,$m);
-    $labels{$m} = sprintf "%s => %s", $m, $owner||"?";
+    # get the owner for modlist modules that don't have first-come
+    my $owner = $all_mods->{$m} || $self->owner_of_module($mgr,$m) || '?';
+    $labels{$m} = "$m => $owner";
   }
   my $n = scalar @all_mods;
   return "--NONE--" unless $n;
@@ -6381,7 +6393,7 @@ sub share_perms_remocos {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   my(@m);
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
 
   my $u = $self->active_user_record($mgr);
 
@@ -6399,7 +6411,7 @@ sub share_perms_remocos {
       if (@sel) {
         for my $sel (@sel) {
           my($selmod,$otheruser) = $sel =~ /^(\S+)\s--\s(\S+)$/;
-          die Apache::HeavyCGI::Exception
+          die PAUSE::HeavyCGI::Exception
               ->new(ERROR => "You do not seem to be owner of $selmod")
                   unless exists $all_mods->{$selmod};
           unless (exists $all_comaints->{$sel}) {
@@ -6448,7 +6460,7 @@ sub share_perms_remocos {
   if (@all == 1) {
     # selectboxes with only ine option to select look confusing and
     # better be preselected:
-    $req->param("pause99_share_perms_remocos_tuples",$all[0]);
+    $req->parameters->set("pause99_share_perms_remocos_tuples",$all[0]);
   }
   push @m, $mgr->scrolling_list(
 				'name' => "pause99_share_perms_remocos_tuples",
@@ -6501,7 +6513,7 @@ sub share_perms_remome {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   my(@m);
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
 
   my $u = $self->active_user_record($mgr);
   my $db = $mgr->connect;
@@ -6518,7 +6530,7 @@ sub share_perms_remome {
         local($db->{RaiseError}) = 0;
         my $sth = $db->prepare("DELETE FROM perms WHERE package=? AND userid=?");
         for my $selmod (@selmods) {
-          die Apache::HeavyCGI::Exception
+          die PAUSE::HeavyCGI::Exception
               ->new(ERROR => "You do not seem to be co-maintainer of $selmod")
                   unless exists $all_mods->{$selmod};
           my $ret = $sth->execute($selmod,$u->{userid});
@@ -6559,7 +6571,7 @@ sub share_perms_remome {
 
   push @m, qq{<p>Select one or more namespaces:</p><p>};
   if (@all_mods == 1) {
-    $req->param("pause99_share_perms_remome_m",$all_mods[0]);
+    $req->parameters->set("pause99_share_perms_remome_m",$all_mods[0]);
   }
   push @m, $mgr->scrolling_list(
 				'name' => "pause99_share_perms_remome_m",
@@ -6579,7 +6591,7 @@ sub share_perms_makeco {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   my(@m);
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
 
   my $u = $self->active_user_record($mgr);
   # warn "u->userid[%s]", $u->{userid};
@@ -6606,7 +6618,7 @@ sub share_perms_makeco {
                                  FROM users
                                  WHERE userid=?");
         $sth1->execute($other_user);
-        die Apache::HeavyCGI::Exception
+        die PAUSE::HeavyCGI::Exception
             ->new(ERROR => sprintf(
                                    "%s is not a valid userid.",
                                    $mgr->escapeHTML($other_user),
@@ -6617,7 +6629,7 @@ sub share_perms_makeco {
         my $sth = $db->prepare("INSERT INTO perms (package,userid)
                             VALUES (?,?)");
         for my $selmod (@selmods) {
-          die Apache::HeavyCGI::Exception
+          die PAUSE::HeavyCGI::Exception
               ->new(ERROR => "You do not seem to be maintainer of $selmod")
                   unless exists $all_mods->{$selmod};
           my $ret = $sth->execute($selmod,$other_user);
@@ -6662,7 +6674,7 @@ sub share_perms_makeco {
 
   push @m, qq{<p>Select one or more namespaces:</p><p>};
   if (@all_mods == 1) {
-    $req->param("pause99_share_perms_makeco_m",$all_mods[0]);
+    $req->parameters->set("pause99_share_perms_makeco_m",$all_mods[0]);
   }
   push @m, $mgr->scrolling_list(
 				'name' => "pause99_share_perms_makeco_m",
@@ -6688,7 +6700,7 @@ sub share_perms_remopr {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   my(@m);
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
 
   my $u = $self->active_user_record($mgr);
 
@@ -6713,7 +6725,7 @@ sub share_perms_remopr {
         local($db->{RaiseError}) = 0;
         my $sth = $db->prepare("DELETE FROM primeur WHERE userid=? AND package=?");
         for my $selmod (@selmods) {
-          die Apache::HeavyCGI::Exception
+          die PAUSE::HeavyCGI::Exception
               ->new(ERROR => "You do not seem to be maintainer of $selmod")
                   unless exists $all_mods->{$selmod};
           my $ret = $sth->execute($u->{userid},$selmod);
@@ -6758,7 +6770,7 @@ sub share_perms_remopr {
 
   push @m, qq{<p>Select one or more namespaces:</p><p>};
   if (@all_mods == 1) {
-    $req->param("pause99_share_perms_pr_m",$all_mods[0]);
+    $req->parameters->set("pause99_share_perms_pr_m",$all_mods[0]);
   }
   push @m, $mgr->scrolling_list(
 				'name' => "pause99_share_perms_pr_m",
@@ -6777,7 +6789,7 @@ sub share_perms_movepr {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
   my(@m);
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
 
   my $u = $self->active_user_record($mgr);
 
@@ -6799,7 +6811,7 @@ sub share_perms_movepr {
                                  FROM users
                                  WHERE userid=?");
         $sth1->execute($other_user);
-        die Apache::HeavyCGI::Exception
+        die PAUSE::HeavyCGI::Exception
             ->new(ERROR => sprintf(
                                    "%s is not a valid userid.",
                                    $mgr->escapeHTML($other_user),
@@ -6809,7 +6821,7 @@ sub share_perms_movepr {
         local($db->{RaiseError}) = 0;
         my $sth = $db->prepare("UPDATE primeur SET userid=? WHERE package=?");
         for my $selmod (@selmods) {
-          die Apache::HeavyCGI::Exception
+          die PAUSE::HeavyCGI::Exception
               ->new(ERROR => "You do not seem to be maintainer of $selmod")
                   unless exists $all_mods->{$selmod};
           my $ret = $sth->execute($other_user,$selmod);
@@ -6858,7 +6870,7 @@ sub share_perms_movepr {
 
   push @m, qq{<p>Select one or more namespaces:</p><p>};
   if (@all_mods == 1) {
-    $req->param("pause99_share_perms_pr_m",$all_mods[0]);
+    $req->parameters->set("pause99_share_perms_pr_m",$all_mods[0]);
   }
   push @m, $mgr->scrolling_list(
 				'name' => "pause99_share_perms_pr_m",
@@ -6930,7 +6942,9 @@ sub all_pmods_not_mmods {
   $sth2->finish;
   $sth2 = $db->prepare(qq{SELECT modid
                              FROM mods
-                             WHERE userid=?});
+                             WHERE userid=?
+                             AND mlstatus='list'
+});
   $sth2->execute($u->{userid});
   while (my($id) = $mgr->fetchrow($sth2, "fetchrow_array")) {
     delete $all_mods{$id};
@@ -6945,12 +6959,13 @@ sub all_cmods {
   my $u = shift;
   my $db = $mgr->connect;
   my(%all_mods);
-  my $sth2 = $db->prepare(qq{SELECT package
-                             FROM perms
-                             WHERE userid=?});
+  my $sth2 = $db->prepare(qq{SELECT perms.package, primeur.userid
+                             FROM perms LEFT JOIN primeur
+                               ON perms.package = primeur.package
+                             WHERE perms.userid=?});
   $sth2->execute($u->{userid});
-  while (my($id) = $mgr->fetchrow($sth2, "fetchrow_array")) {
-    $all_mods{$id} = undef;
+  while (my($id, $owner) = $mgr->fetchrow($sth2, "fetchrow_array")) {
+    $all_mods{$id} = $owner;
   }
   $sth2->finish;
   \%all_mods;
@@ -7008,12 +7023,11 @@ sub coredump {
   chdir "/usr/local/apache/cores" or die "Couldn't chdir: $!";
   warn "**************>>>>>>>>>>     strace -p $$\n";
   sleep 10;
-  my $r = $mgr->{R};
   require Cwd;
   my $cwd = Cwd::cwd();
   require BSD::Resource;
   my($nowsoft,$nowhard) = BSD::Resource::getrlimit(BSD::Resource::RLIMIT_CORE());
-  $r->log_error("UID[$<]EUID[$>]cwd[$cwd]nowsoft[$nowsoft]nowhard[$nowhard]");
+  $mgr->{REQ}->logger({level => 'error', message => "UID[$<]EUID[$>]cwd[$cwd]nowsoft[$nowsoft]nowhard[$nowhard]"});
   CORE::dump;
 }
 
@@ -7032,7 +7046,7 @@ sub dele_message {
   <i>Delete</i>.</p>};
 
   my $dbh = $mgr->connect;
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
   my $sth = $dbh->prepare("SELECT * FROM messages where mfrom=? AND mstatus='active'
  ORDER BY created desc");
   $sth->execute($mgr->{User}{userid});
@@ -7097,7 +7111,7 @@ sub post_message {
   <i>Submit</i>.</p><hr />};
 
   my $dbh = $mgr->connect;
-  my $req = $mgr->{CGI};
+  my $req = $mgr->{REQ};
 
   my $mto = $req->param('pause99_post_message_mto');
   $mto = uc $mto;
@@ -7140,7 +7154,7 @@ sub post_message {
  <a href="?ACTION=edit_cred&amp;HIDDENNAME=%s">%s</a> posted.},
           ($mgr->escapeHTML($mto))x2;
       for my $f (qw(mto mess)) {
-        $req->param("pause99_post_message_$f","");
+        $req->parameters->set("pause99_post_message_$f","");
       }
     }
   }
@@ -7166,8 +7180,7 @@ sub post_message {
 sub reset_version {
   my pause_1999::edit $self = shift;
   my $mgr = shift;
-  my $req = $mgr->{CGI};
-  my $r = $mgr->{R};
+  my $req = $mgr->{REQ};
   my @m;
   my $u = $self->active_user_record($mgr);
   push @m, qq{<input type="hidden" name="HIDDENNAME" value="$u->{userid}" />};

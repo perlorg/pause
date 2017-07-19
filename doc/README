@@ -1,9 +1,13 @@
+=head1 Other places with docs
+
+PAUSE.pod
+
 =head1 HOW TO SET UP A PRIVATE PAUSE APACHE
 
 I always compiled it myself, so I repeat that exercise. Download
 apache 1.3.xx and untar it. Then I prepare the distroprefs file for
 this apache. I'm doing all my cpan download through the cpan shell and
-collect all intricacies of modules in distorprefs files so I can
+collect all intricacies of modules in distroprefs files so I can
 forget many details in everyday work. At the time of this writing
 mod_perl 1.30 was current and it needed a patch to run with perl 5.10.
 You may need this patch too.
@@ -36,7 +40,7 @@ If it builds and tests fine install it.
 
 Next, we need to write the apache configuration. I like it to have the
 server standalone so I can run it and stop it whenever I like. The
-config I use on my laptop in in the repository as
+config I use on my laptop is in the repository as
 C<apache-conf/httpd.conf.pause.atk81>, please take it as a blueprint
 and adjust your paths and usernames, etc. Fire up the apache with
 
@@ -50,8 +54,12 @@ But it's unauthenticated. To get authentication working we need a
 database. Let's start with the "mod" database:
 
   mysqladmin -uroot -p create mod
-  rsync -vaP pause::pausedata/moddump.current.bz2 .
+  rsync -vaP pause.perl.org::pausedata/moddump.current.bz2 .
   bzcat moddump.current.bz2 | mysql -uroot -p mod
+
+You can also fetch the dump from
+https://pause.perl.org/pub/PAUSE/PAUSE-data/moddump.current.bz2 but
+this will require PAUSE authentication.
 
 Then the authentication database.
 
@@ -73,7 +81,8 @@ interfaces:
 
 And finally we must make these databases available to the perl.
 
-  mkdir privatelib/
+  mkdir -p ../pause-private/lib
+  mkdir privatelib/    # old pause
 
 Edit C<privatelib/PrivatePAUSE.pm> and enter something like this:
 
@@ -181,7 +190,7 @@ account informations. On the database side this is achieved by
 granting the privileges on the two tables, nothing else, to one user.
 The grant statement looks something like
 
-  grant delete,index,insert,select,update,lock tables on mod.* to \
+  grant delete,index,insert,select,update,lock tables on `mod`.* to \
         'xxx'@'yyy' identified by 'zzz';
 
 For replication, three additional privileges are needed: "reload,
@@ -219,5 +228,11 @@ repository because they are so basic stuff for any UNIX machine:
 
 and probably more. If you discover pieces that are important but
 missing in the repository or documentation, please let us know.
+
+=head2 Undocumented
+
+Other things that need to be setup somehow:
+
+  gpg signing key
 
 =cut

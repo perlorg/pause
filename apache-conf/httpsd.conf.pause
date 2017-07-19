@@ -48,8 +48,8 @@ UserDir enabled jwied
     SSLCacheServerPort 8112
   </IfDefine>
   <IfDefine !SWITCH8000>
-    Port 443
-    Listen 443
+    #Port 443
+    #Listen 443
     SSLCacheServerPort 8111
   </IfDefine>
 
@@ -68,9 +68,9 @@ UserDir enabled jwied
   #     ln -s -f cacert-class3.crt  `openssl x509 -noout -hash < cacert-class3.crt`.0
   #     ln -s -f cacert-root.crt    `openssl x509 -noout -hash < cacert-root.crt`.0
   #     ln -s -f pause.perl.org-xxx.crt `openssl x509 -noout -hash < pause.perl.org-xxx.crt`.0
-  SSLCACertificatePath  /home/k/PAUSE/111_sensitive/apache-conf/
-  SSLCACertificateFile  /home/k/PAUSE/111_sensitive/apache-conf/cacert-class3.crt
-  SSLCertificateFile    /home/k/PAUSE/111_sensitive/apache-conf/pause.perl.org-20100512.crt
+  SSLCACertificatePath  /home/k/pause/apache-conf/
+  SSLCACertificateFile  /home/k/pause/apache-conf/ssl.crt/rapidssl-intermediate.crt
+  SSLCertificateFile    /home/k/pause/apache-conf/ssl.crt/rapidssl.pause.perl.org.crt
   SSLCertificateKeyFile /home/k/PAUSE/111_sensitive/apache-conf/pause.perl.org-20080519.key
 
   SSLVerifyClient 0
@@ -357,10 +357,10 @@ for my $loc ( "/perl" ){
 for my $loc (qw(/pub /incoming)){
   $Location{$loc}{IndexOptions} = "FancyIndexing NameWidth=* SuppressDescription";
 }
-$MinSpareServers = 2;
-$MaxSpareServers = 4;
-$StartServers = 2;
-$MaxClients = 6;
+$MinSpareServers = 4;
+$MaxSpareServers = 12;
+$StartServers = 4;
+$MaxClients = 12;
 if (Apache->define("ONE_PROCESS")) {
   $MaxRequestsPerChild = 1; # 1: I want to see the SEGV
 } else {

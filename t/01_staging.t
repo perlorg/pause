@@ -1,4 +1,5 @@
 
+use strict;
 use LWP::UserAgent;
 use Sys::Hostname qw(hostname);
 use utf8;
@@ -17,18 +18,18 @@ use utf8;
 }
 my $root;
 $|=1;
+my $hostname;
 BEGIN {
     unshift @INC, './lib', './t';
-
+    $hostname = hostname;
     my $exit_message;
-    my $hostname = hostname;
     if ($hostname =~ /^k(75|81)/) {
         my $h = $1;
         $root = "http://andk:ddd\@$hostname:8406";
         my $resp = _ua->get("$root/pause/query");
         unless ($resp->is_success) {
             my $apache;
-            for $path (
+            for my $path (
                        "/home/src/apache/apache_1.3.42/src/httpd",
                        "/home/src/apache/apachebin/1.3.41/bin/httpd",
                        "/home/src/www/apache/apachebin/1.3.37/bin/httpd",
@@ -85,10 +86,17 @@ use Test::More;
 }
 
 {
+    # admin
+    BEGIN { $tests+=1 }
+    my $resp = _ua->get("$root/pause/query?ACTION=who_admin;OF=YAML");
+    like $resp->decoded_content, qr/\bDAGOLDEN\b/, "found David Golden as admin";
+}
+
+{
     # emails for ABH
     BEGIN { $tests+=1 }
     my $resp = _ua->get("$root/pause/authenquery?ACTION=email_for_admin;OF=YAML");
-    like $resp->decoded_content, qr/\bANDK:\s.+franz\b/, "found andk on host franz";
+    like $resp->decoded_content, qr/\bANDK:\s.+franz\b/, "found andk on host $hostname";
 }
 
 BEGIN { plan tests => $tests }

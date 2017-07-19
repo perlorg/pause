@@ -9,23 +9,31 @@ sub mypause_daemon_inspector::loop ();
 my $VERSION = "1049";
 my $Id = qq!paused, v$VERSION!;
 
-use lib "/home/k/PAUSE/lib", "/home/k/dproj/PAUSE/GIT-ghub/lib";
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use PAUSE ();
 
 use DBI ();
 use Fcntl qw(:flock);
+use File::Basename ();
 use File::Path ();
+use File::Spec ();
+use File::Temp ();
 use Getopt::Long;
 use HTTP::Date ();
 use HTTP::Status ();
 use IO::File ();
 use IPC::Run3 ();
 use LWP ();
-use MD5 ();
+use Digest::MD5 ();
+use Digest::SHA1 ();
 use Mail::Send ();
-use PAUSE ();
 use PAUSE::MailAddress ();
 use POSIX ":sys_wait_h";
+use Path::Tiny;
+use File::pushd ();
 use URI::URL ();
+use CPAN::DistnameInfo;
 
 use strict;
 use vars qw(%Opt);
@@ -136,6 +144,7 @@ sub send {
 
 package mypause_daemon_inspector;
 
+use Fcntl qw(SEEK_SET);
 use List::Util qw(max);
 
 # package mypause_daemon_inspector
@@ -315,11 +324,12 @@ skip        =not yet verified
               $self->logge("Info: Started mldistwatch for lpath[$lpath] with pid[$pid]");
             } else {
               # child
-              exec '/home/k/PAUSE/cron/mldistwatch',
-                  '--pick',
-                      $lpath,
-                          '--logfile',
-                              '/var/log/mldistwatch.log';
+              exec $^X,
+                  "$PAUSE::Config->{CRONPATH}/mldistwatch",
+                      '--pick',
+                          $lpath,
+                              '--logfile',
+                                  '/var/log/mldistwatch.log';
             }
           } else {
             $self->logge("Alert: could not fork for mldistwatch: $!");
@@ -375,7 +385,7 @@ sub woe {
     $asciiname ||= $fullname;
     $asciiname =~ s/[^\0-\177]/?/g;
     my @To;
-    my $pma = PAUSE::MailAddress->new_from_userid($userid,{dbh => $dbh});
+    my $pma = PAUSE::MailAddress->new_from_userid($userid);
     my $to  = $pma->address;
     push @To, $PAUSE::Config->{ADMIN}, qq{"$asciiname" <$to>};
 
@@ -446,7 +456,7 @@ but I couldn't ($!). Seems as if the admin has to do something\n\n";
     $asciiname ||= $fullname;
     $asciiname =~ s/[^\0-\177]/?/g;
     my @To;
-    my $pma = PAUSE::MailAddress->new_from_userid($userid,{dbh => $dbh});
+    my $pma = PAUSE::MailAddress->new_from_userid($userid);
     my $address  = $pma->address;
     push @To, $PAUSE::Config->{ADMIN}, qq{"$asciiname" <$address>};
 
@@ -494,14 +504,18 @@ sub welcome_file {
 
   $hash->{dgot} = $self->{NOW};
   $self->logge("Info: Got $hash->{uriid} (size $size)");
-  my $md5 = MD5->new;
+  my $md5 = Digest::MD5->new;
+  my $sha1 = Digest::SHA1->new;
   my $handle = IO::File->new;
   unless ( $handle->open("<$PAUSE::Config->{MLROOT}$hash->{uriid}\0") ){
     die "open $PAUSE::Config->{MLROOT}$hash->{uriid}: $!";
   }
   $md5->addfile($handle);
+  $handle->seek(SEEK_SET, 0);
+  $sha1->addfile($handle);
   $handle->close;
   my $hexdigest = $md5->hexdigest;
+  my $sha1hexdigest = $sha1->hexdigest;
   my($userid) = PAUSE::dir2user($hash->{uriid});
   my $sth2 = $self->{STH2};
   $sth2->execute($userid) or warn;
@@ -509,7 +523,7 @@ sub welcome_file {
   $asciiname ||= $fullname;
   $asciiname =~ s/[^\0-\177]/?/g;
   my $dbh = $self->{DBH};
-  my $pma = PAUSE::MailAddress->new_from_userid($userid,{dbh => $dbh});
+  my $pma = PAUSE::MailAddress->new_from_userid($userid);
   my $address  = $pma->address;
   my @To = qq{"$asciiname" <$address>};
   unless ($PAUSE::Config->{TESTHOST}) {
@@ -529,9 +543,22 @@ has entered CPAN as
   file: \$CPAN/authors/id/$hash->{uriid}
   size: $size bytes
    md5: $hexdigest
-
-No action is required on your part
+  sha1: $sha1hexdigest
 };
+
+  my $di = CPAN::DistnameInfo->new($hash->{uriid});
+  my $distname = $di->dist if $di;
+  if ($distname) {
+    $blurb .= qq{
+CPAN Testers will start reporting results in an hour or so:
+
+  http://matrix.cpantesters.org/?dist=$distname
+
+};
+  }
+  else {
+    $blurb .= "\nNo action is required on your part\n\n";
+  }
 
   $userid = PAUSE::dir2user($hash->{uriid});
   $sth2->execute($hash->{changedby});
@@ -603,13 +630,16 @@ sub is_valid {
 sub getit {
   my($self) = @_;
 
+  my $is_perl6       = $self->{URIRECORD}{is_perl6};
   my $nosuccesscount = $self->{URIRECORD}{nosuccesscount};
   my $uri            = $self->{URIRECORD}{uri};
-  my $uriid          = $self->{URIRECORD}{uriid};
+  my $uriid          = $self->{URIRECORD}{uriid}; # e.g. A/AA/AADLER/Games-LogicPuzzle-0.10.tar.gz,
+                                                  #      F/FR/FROGGS/Perl6/ACME-Ignore-Me-0.001.tar.gz
 
   return unless $self->is_valid($uriid);
 
   my $lpath  = $PAUSE::Config->{MLROOT} . $uriid;
+  my $lpath_orig = $lpath; # e.g. verify_gzip_tar could change it for the Perl6/ directory
   my $tpath  = $PAUSE::Config->{TMP} . $uriid;
   die "Panic" if $tpath =~ s/[\\\'\"\;\s]//g;
   if ($uri =~ /\.Z$/) {
@@ -659,8 +689,15 @@ sub getit {
     $self->logge("Alert: no mirror: RC_NOT_MODIFIED for $tpath");
     return;
   } elsif ($response->is_success) {
-      if (my $size = $self->verify_gzip_tar($tpath,$uri,$nosuccesscount,$lpath)) {
+      if (my $size = $self->verify_gzip_tar($tpath,$uri,$nosuccesscount,\$lpath)) {
           PAUSE::newfile_hook($lpath);
+          unless ($lpath eq $lpath_orig) {
+              # OMG, they changed the lpath
+              $self->{URIRECORD}{uriid} = $uriid = substr($lpath, length($PAUSE::Config->{MLROOT}));
+              if ($lpath =~ m{^Perl6/}) {
+                  $self->{URIRECORD}{is_perl6} = $is_perl6 = 1;
+              }
+          }
           return $size;
       } else {
           return;
@@ -677,20 +714,27 @@ sub getit {
 }
 
 sub verify_gzip_tar {
-    my($self,$tpath,$uri,$nosuccesscount,$lpath) = @_;
+    my($self,$tpath,$uri,$nosuccesscount,$lpath_ref) = @_;
+    my $lpath = $$lpath_ref;
     my $zcat;
     my $gzip;
+    my $taropt;
+    my $testinggzip;
     if ($tpath =~ /\.t(ar\.)?gz$/) {
-        $zcat = "/bin/zcat";
-        $gzip = "/bin/gzip";
-    } elsif ($tpath =~ /\.t(ar\.)?bz$/) {
-        $zcat = "/bin/bzcat";
-        $gzip = "/bin/bzip2";
+        $zcat = $PAUSE::Config->{ZCAT_PATH};
+        $gzip = $PAUSE::Config->{GZIP_PATH};
+        $taropt = "tvzf";
+        $testinggzip = $zcat;
+    } elsif ($tpath =~ /\.(tbz|tar\.bz2)$/) {
+        $zcat = $PAUSE::Config->{BZCAT_PATH};
+        $gzip = $PAUSE::Config->{BZIP2_PATH};
+        $taropt = "tvjf";
+        $testinggzip = $gzip;
     } else {
         # nothing I could verify
         if (rename($tpath,$lpath)) {
             $self->logge("Info: renamed '$tpath' to '$lpath'");
-            return -s $lpath;
+            return $lpath;
         } else {
             $self->logge("Alert: could not rename '$tpath' to '$lpath'");
             return;
@@ -699,19 +743,19 @@ sub verify_gzip_tar {
     die "no executable for zcat '$zcat'" unless -x $zcat;
     die "no executable for gzip '$gzip'" unless -x $gzip;
     my($out,$err);
-    if ($tpath =~ /\.(Z|t?gz)$/){
+    if ($tpath =~ /\.(Z|t?gz|tbz|bz2)$/){
         my($child_stat) = 0;
         sleep 1;
         local $SIG{CHLD};
         my $ls = `ls -l $tpath`;
-        IPC::Run3::run3([$zcat, "-t", $tpath], undef, \$out, \$err, {return_if_system_error => 1});
+        IPC::Run3::run3([$testinggzip, "-t", $tpath], undef, \$out, \$err, {return_if_system_error => 1});
         $child_stat = $?;
         if ($child_stat > 0) {
             if ($err =~ /decompression OK, trailing garbage ignored/) {
                 rename $tpath, "$tpath.crcgarbage" or $self->logge("Could not rename '$tpath': $!");
                 my $system = "$zcat $tpath.crcgarbage 2>/dev/null | $gzip -9c > $tpath";
                 system($system); # ignore return value
-                IPC::Run3::run3([$zcat, "-t", $tpath], undef, \$out, \$err, {return_if_system_error => 1});
+                IPC::Run3::run3([$testinggzip, "-t", $tpath], undef, \$out, \$err, {return_if_system_error => 1});
                 $child_stat = $?;
             }
         } elsif ($child_stat < 0) {
@@ -725,7 +769,7 @@ sub verify_gzip_tar {
             my @To = $PAUSE::Config->{ADMIN};
 
             my $blurb = "For the resource [$uri]
- the command [$zcat -t $tpath]
+ the command [$testinggzip -t $tpath]
  returned status [$child_stat]
  and stdout[$out] and stderr[$err].
  nosuccesscount is now at [$nosuccesscount].
@@ -748,6 +792,42 @@ sub verify_gzip_tar {
             return;
         }
     }
+    my $lpath_is_for_perl6 = $lpath =~
+        m{\Q$PAUSE::Config->{MLROOT}\E[A-Z]/[A-Z][A-Z]/[A-Z][-A-Z]*[A-Z0-9]+/Perl6/};
+    if (open my $fh, "-|", tar => $taropt, $tpath) {
+        my $must_rewrite = 0;
+        my $p6_must_change_lpath = $lpath_is_for_perl6 ? 0 : undef;
+        while (<$fh>) {
+            # -r--r--r-- k/k             337 2001-04-26 12:24 Apache-Session-Counted-1.118/Makefile.PL
+            if (my($dir,$ur,$uw,$ux,$gr,$gw,$gx,$or,$ow,$ox) = /^(.)(.)(.)(.)(.)(.)(.)(.)(.)(.) /) {
+                $must_rewrite = 1 if $ow eq "w";
+            }
+            if (/META6\.json/ && ! defined $p6_must_change_lpath) {
+                # maybe a perl6 package, make sure it really is
+                my @F = split " ", $_;
+                my @path = split m:/:, $F[-1];
+                if ($path[1] eq 'META6.json') {
+                    $p6_must_change_lpath = 1;
+                    $self->logge("will have to change lpath $lpath to a Perl6 directory");
+                }
+            }
+        }
+        close $fh or warn "Could not close: $!";
+        if ($must_rewrite) {
+            my $success = eval { _rewrite_tarball($tpath); 1; };
+            if ($success) {
+                $self->logge("Info: have rewritten tarball to eliminate world writeables");
+            } else {
+                $self->logge("Alert: Failed to rewrite: $@");
+            }
+        }
+        if ($p6_must_change_lpath) {
+            $lpath =~ s!(\Q$PAUSE::Config->{MLROOT}\E./../[^/]+)(/.+)!$1/Perl6$2!;
+            File::Path::mkpath(File::Basename::dirname($lpath));
+            $$lpath_ref = $lpath; # propagate back to caller
+            $self->logge("Perl6-change: have changed lpath to $lpath");
+        }
+    }
     if ( $tpath =~ m/\.Z$/ ) {
         if (-e $lpath) {
             $self->logge("Alert: Seem to have both a .Z and a .gz");
@@ -760,11 +840,63 @@ sub verify_gzip_tar {
         if (rename($tpath,$lpath)) {
             $self->logge("Info: renamed '$tpath' to '$lpath'");
         } else {
-            $self->logge("Alert: could not rename '$tpath' to '$lpath'");
+            $self->logge("Alert: could not rename '$tpath' to '$lpath': $!");
             return;
         }
     }
     return -s $lpath;
+}
+
+sub _rewrite_tarball {
+    my($path) = @_;
+    $path = File::Spec->rel2abs($path);
+    my $testdir = File::Temp::tempdir(
+                                      "paused_rewrite_XXXX",
+                                      DIR => "/tmp",
+                                      CLEANUP => 1,
+                                     ) or die "Could not make a tmp directory";
+    my $taropt;
+    if ($path =~ /\.t(ar\.)?gz$/) {
+        $taropt = "-z";
+    } elsif ($path =~ /\.t(ar\.)?bz$/) {
+        $taropt = "-j";
+    }
+    open my $fh, "-|", tar => "-C", $testdir, $taropt, "-xvvf", $path or die "could not fork";
+    my(@ww); #world-writable
+    my(@dnx); #directories-not-xessable
+    while (<$fh>) {
+        chomp;
+        my($stat,@rest) = split " ", $_;
+        my($dir,$ur,$uw,$ux,$gr,$gw,$gx,$or,$ow,$ox) = $stat =~ /^(.)(.)(.)(.)(.)(.)(.)(.)(.)(.)/;
+        if ($ow && $ow eq "w") {
+            push @ww, $rest[-1];
+        }
+        if ($dir && $ux && $dir eq "d" && $ux ne "x") {
+            push @dnx, $rest[-1];
+        }
+    }
+    for my $dnx (@dnx) {
+        my $d = "$testdir/$dnx";
+        my @stat = stat $d or die "Could not stat d '$d': $!";
+        unless (chmod $stat[2] | 0100, $d) {
+            die "Could not chmod directory without x '$d': $!";
+        }
+    }
+    for my $ww (@ww) {
+        my $wwf = "$testdir/$ww";
+        my @stat = stat $wwf or die "Could not stat wwf '$wwf': $!";
+        unless (chmod $stat[2] &~ 0022, $wwf) {
+            die "Could not chmod world writeable '$wwf': $!";
+        }
+    }
+    chmod 0755, $testdir;
+    my $rc;
+    {
+        my $wd = File::pushd::pushd( $testdir );
+        my @children = Path::Tiny::path(".")->children;
+        $rc = 0 == system tar => $taropt, "-cf", $path, @children or die "Could not tar c";
+    }
+    return $rc;
 }
 
 # often called as a class method!
@@ -799,25 +931,24 @@ sub timestamp { # Efficiently generate a time stamp for log files
 # package mypause_daemon_inspector
 sub writeback {
   my($self,$hash,$hash_orig,$dbh) = @_;
-  my(@v,$v);
+  my(@v,@queryparams);
   for (qw[dgot dverified ddeleted uriid
-	  nosuccesstime nosuccesscount]) {
-    push @v, "$_='$hash->{$_}'" if $hash->{$_} ne $hash_orig->{$_};
+	  nosuccesstime nosuccesscount is_perl6]) {
+    next if $hash->{$_} eq $hash_orig->{$_};
+    push @v, "$_=?";
+    push @queryparams, $hash->{$_};
   }
   return 0 unless @v;
-  my $query = "UPDATE uris SET ";
-  $query .= join ", ", @v;
-  ($v = $hash_orig->{uriid}) =~ s/'/\\'/g;
-  my $whereclause .= " WHERE uriid='$v'";
-  $query .= $whereclause;
+  my $query = "UPDATE uris SET " . join(", ", @v) . " WHERE uriid=?";
+  push @queryparams, $hash_orig->{uriid};
   # $self->logge("Info: Going to $query");
-  $dbh->do($query) or $self->logge("Alert: $DBI::errstr: $query");
+  $dbh->do($query, undef, @queryparams) or $self->logge("Alert: $DBI::errstr: $query/(@queryparams)");
   if ($DBI::errstr =~ /Non unique key|Duplicate/i) {
-    my $dquery = "DELETE FROM uris $whereclause";
-    $self->logge("Debug: Non-uniq-Error; trying: $dquery");
-    $dbh->do($dquery) or $self->logge("Debug: $DBI::errstr: $dquery");
-    $self->logge("Debug: retry now: $query");
-    $dbh->do($query) or $self->logge("Alert: $DBI::errstr: $query");
+    my $dquery = "DELETE FROM uris WHERE uriid=?";
+    $self->logge("Debug: Non-uniq-Error; trying: $dquery/$hash_orig->{uriid}");
+    $dbh->do($dquery, undef, $hash_orig->{uriid}) or $self->logge("Debug: $DBI::errstr: $dquery");
+    $self->logge("Debug: retry now: $dquery/$hash_orig->{uriid}");
+    $dbh->do($dquery, undef, $hash_orig->{uriid}) or $self->logge("Alert: $DBI::errstr: $dquery");
   }
   return 1;
 }
